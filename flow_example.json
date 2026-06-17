@@ -1,0 +1,73 @@
+{
+  "flow_name": "example_flow",
+  "poll_interval": 10,
+  "stages": [
+    {
+      "name": "preprocessing",
+      "tasks": [
+        {
+          "name": "validate_inputs",
+          "jobs": [
+            {
+              "name": "check_data",
+              "command": "python validate.py -i input.txt -o temp.txt",
+              "queue": "all",
+              "cpu": 1,
+              "inputs": ["input.txt"],
+              "outputs": ["temp.txt"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "processing",
+      "tasks": [
+        {
+          "name": "task_1",
+          "jobs": [
+            {
+              "name": "process_part_1",
+              "command": "python process.py -i temp.txt -o output_1.txt -part 1",
+              "queue": "all",
+              "cpu": 4,
+              "inputs": ["temp.txt"],
+              "outputs": ["output_1.txt"]
+            }
+          ]
+        },
+        {
+          "name": "task_2",
+          "jobs": [
+            {
+              "name": "process_part_2",
+              "command": "python process.py -i temp.txt -o output_2.txt -part 2",
+              "queue": "all",
+              "cpu": 4,
+              "inputs": ["temp.txt"],
+              "outputs": ["output_2.txt"]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "postprocessing",
+      "tasks": [
+        {
+          "name": "merge_results",
+          "jobs": [
+            {
+              "name": "merge",
+              "command": "python merge.py -i1 output_1.txt -i2 output_2.txt -o final_output.txt",
+              "queue": "all",
+              "cpu": 2,
+              "inputs": ["output_1.txt", "output_2.txt"],
+              "outputs": ["final_output.txt"]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
