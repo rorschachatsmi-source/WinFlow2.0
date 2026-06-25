@@ -1,0 +1,3 @@
+design: demo_chip
+revision: 1.0
+blocks: 3

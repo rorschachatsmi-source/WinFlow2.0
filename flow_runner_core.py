@@ -209,7 +209,8 @@ class LSFJobManager:
         job_id: str,
         job_outputs: List[str],
         poll_interval: int = 10,
-        validator: Optional[FlowValidator] = None
+        validator: Optional[FlowValidator] = None,
+        on_status: Optional[Callable[[JobStatus], None]] = None,
     ):
         """
         Wait for job completion and validate outputs
@@ -219,11 +220,14 @@ class LSFJobManager:
             job_outputs: Expected output paths
             poll_interval: Polling interval in seconds
             validator: FlowValidator instance for output validation
+            on_status: Optional callback invoked on each status poll
         """
         validator = validator or FlowValidator(self.logger)
 
         while True:
             status = self.get_status(job_id)
+            if on_status:
+                on_status(status)
             self.logger.info(f"[{job_id}] Status: {status.value}")
 
             if status == JobStatus.DONE:
@@ -243,11 +247,17 @@ class FlowRunner:
         self,
         logger: FlowLogger,
         validator: FlowValidator,
-        job_manager: LSFJobManager
+        job_manager: LSFJobManager,
+        job_callback: Optional[Callable[[str, Dict], None]] = None,
     ):
         self.logger = logger
         self.validator = validator
         self.job_manager = job_manager
+        self.job_callback = job_callback
+
+    def _notify_job(self, event: str, **data):
+        if self.job_callback:
+            self.job_callback(event, data)
 
     def run_job(
         self,
@@ -255,12 +265,30 @@ class FlowRunner:
         stage_name: str,
         task_name: str,
         job: Dict,
-        poll_interval: int
+        poll_interval: int,
+        job_filter: Optional[Callable[[str], bool]] = None,
     ):
         """Execute a single job"""
-        job_name = self._create_unique_job_name(job["name"])
+        template_name = job["name"]
+        job_key = f"{stage_name}/{task_name}/{template_name}"
+
+        if job_filter and not job_filter(job_key):
+            self.logger.info(f"[SKIP] {job_key} (already completed)")
+            return
+
+        job_name = self._create_unique_job_name(template_name)
         job_inputs = job["inputs"]
         job_outputs = job["outputs"]
+
+        self._notify_job(
+            "job_start",
+            job_key=job_key,
+            template_name=template_name,
+            lsf_name=job_name,
+            stage=stage_name,
+            task=task_name,
+            status="pending",
+        )
 
         self.logger.info(f"[JOB] {job_name}")
         self.logger.debug(f"  Inputs: {job_inputs}")
@@ -277,9 +305,52 @@ class FlowRunner:
             cpu=job.get("cpu", 1)
         )
 
-        # Wait for completion
-        self.job_manager.wait_job(job_id, job_outputs, poll_interval, self.validator)
+        self._notify_job(
+            "job_submitted",
+            job_key=job_key,
+            template_name=template_name,
+            lsf_name=job_name,
+            job_id=job_id,
+            stage=stage_name,
+            task=task_name,
+            status=JobStatus.PENDING.value,
+        )
 
+        # Wait for completion
+        try:
+            self.job_manager.wait_job(
+                job_id,
+                job_outputs,
+                poll_interval,
+                self.validator,
+                on_status=lambda s: self._notify_job(
+                    "job_status",
+                    job_key=job_key,
+                    template_name=template_name,
+                    lsf_name=job_name,
+                    job_id=job_id,
+                    status=s.value,
+                ),
+            )
+        except Exception:
+            self._notify_job(
+                "job_failed",
+                job_key=job_key,
+                template_name=template_name,
+                lsf_name=job_name,
+                job_id=job_id,
+                status=JobStatus.EXIT.value,
+            )
+            raise
+
+        self._notify_job(
+            "job_done",
+            job_key=job_key,
+            template_name=template_name,
+            lsf_name=job_name,
+            job_id=job_id,
+            status=JobStatus.DONE.value,
+        )
         self.logger.info(f"[SUCCESS] {job_name}")
 
     def run_task(
@@ -287,14 +358,17 @@ class FlowRunner:
         flow_name: str,
         stage_name: str,
         task: Dict,
-        poll_interval: int
+        poll_interval: int,
+        job_filter: Optional[Callable[[str], bool]] = None,
     ):
         """Execute a task (may contain multiple jobs)"""
         task_name = task["name"]
         self.logger.info(f"[TASK START] {task_name}")
 
         for job in task["jobs"]:
-            self.run_job(flow_name, stage_name, task_name, job, poll_interval)
+            self.run_job(
+                flow_name, stage_name, task_name, job, poll_interval, job_filter
+            )
 
         self.logger.info(f"[TASK END] {task_name}")
 
@@ -302,7 +376,8 @@ class FlowRunner:
         self,
         flow_name: str,
         stage: Dict,
-        poll_interval: int
+        poll_interval: int,
+        job_filter: Optional[Callable[[str], bool]] = None,
     ):
         """Execute a stage (may contain multiple tasks in parallel)"""
         stage_name = stage["name"]
@@ -315,7 +390,8 @@ class FlowRunner:
                     flow_name,
                     stage_name,
                     task,
-                    poll_interval
+                    poll_interval,
+                    job_filter,
                 )
                 for task in stage["tasks"]
             ]
@@ -325,7 +401,11 @@ class FlowRunner:
 
         self.logger.info(f"[STAGE END] {stage_name}")
 
-    def run_flow(self, config: Dict):
+    def run_flow(
+        self,
+        config: Dict,
+        job_filter: Optional[Callable[[str], bool]] = None,
+    ):
         """Execute complete flow"""
         if not self.validator.validate_config(config):
             raise RuntimeError("Invalid flow configuration")
@@ -337,7 +417,7 @@ class FlowRunner:
 
         try:
             for stage in config["stages"]:
-                self.run_stage(flow_name, stage, poll_interval)
+                self.run_stage(flow_name, stage, poll_interval, job_filter)
 
             self.logger.info(f"[FLOW SUCCESS] {flow_name}")
         except Exception as e:
@@ -354,13 +434,14 @@ class FlowRunner:
 
 def create_flow_runner(
     log_file: Optional[str] = None,
-    log_callback: Optional[Callable] = None
+    log_callback: Optional[Callable] = None,
+    job_callback: Optional[Callable[[str, Dict], None]] = None,
 ) -> FlowRunner:
     """Factory function to create a FlowRunner instance"""
     logger = FlowLogger(log_file, log_callback)
     validator = FlowValidator(logger)
     job_manager = LSFJobManager(logger)
-    return FlowRunner(logger, validator, job_manager)
+    return FlowRunner(logger, validator, job_manager, job_callback)
 
 
 if __name__ == "__main__":
