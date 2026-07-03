@@ -18,6 +18,8 @@ from typing import Dict, List, Optional, Callable
 from dataclasses import dataclass
 from enum import Enum
 
+from winflow_config import get_config
+
 
 class JobStatus(Enum):
     """LSF Job status enumeration"""
@@ -55,7 +57,7 @@ class FlowLogger:
 
     def _setup_logger(self) -> logging.Logger:
         """Setup logging configuration"""
-        logger = logging.getLogger("FlowRunner")
+        logger = logging.getLogger(get_config().runner.logger_name)
         logger.setLevel(logging.DEBUG)
 
         # Console handler
@@ -134,15 +136,17 @@ class FlowValidator:
 class LSFJobManager:
     """Manages LSF job submission and monitoring"""
 
-    def __init__(self, logger: FlowLogger):
+    def __init__(self, logger: FlowLogger, config=None):
         self.logger = logger
+        self.config = config or get_config()
 
     def submit_job(
         self,
         job_name: str,
         command: str,
-        queue: str = "all",
-        cpu: int = 1
+        queue: Optional[str] = None,
+        cpu: Optional[int] = None,
+        machine: str = "",
     ) -> str:
         """
         Submit job to LSF cluster
@@ -152,6 +156,7 @@ class LSFJobManager:
             command: Command to execute
             queue: LSF queue name
             cpu: Number of CPUs
+            machine: Space-separated host list for bsub -m (optional)
             
         Returns:
             Job ID string
@@ -159,18 +164,25 @@ class LSFJobManager:
         Raises:
             RuntimeError: If job submission fails
         """
-        log_dir = "log"
+        runner_cfg = self.config.runner
+        lsf_cfg = self.config.lsf
+        queue = queue if queue is not None else runner_cfg.default_queue
+        cpu = cpu if cpu is not None else runner_cfg.default_cpu
+        log_dir = runner_cfg.job_log_dir
         os.makedirs(log_dir, exist_ok=True)
 
         cmd = [
-            "bsub",
+            lsf_cfg.bsub,
             "-J", job_name,
             "-q", queue,
             "-n", str(cpu),
             "-o", f"{log_dir}/{job_name}.log",
             "-e", f"{log_dir}/{job_name}.err",
-            command
         ]
+        machine = str(machine).strip()
+        if machine:
+            cmd.extend(["-m", machine])
+        cmd.append(command)
 
         self.logger.debug(f"Submitting: {' '.join(cmd)}")
 
@@ -190,8 +202,13 @@ class LSFJobManager:
 
     def get_status(self, job_id: str) -> JobStatus:
         """Get LSF job status"""
+        lsf_cfg = self.config.lsf
+        bjobs_cmd = [lsf_cfg.bjobs]
+        if lsf_cfg.bjobs_noheader:
+            bjobs_cmd.append("-noheader")
+        bjobs_cmd.extend(["-o", lsf_cfg.bjobs_output_field, str(job_id)])
         result = subprocess.run(
-            ["bjobs", "-noheader", "-o", "stat", str(job_id)],
+            bjobs_cmd,
             capture_output=True,
             text=True
         )
@@ -208,7 +225,7 @@ class LSFJobManager:
         self,
         job_id: str,
         job_outputs: List[str],
-        poll_interval: int = 10,
+        poll_interval: Optional[int] = None,
         validator: Optional[FlowValidator] = None,
         on_status: Optional[Callable[[JobStatus], None]] = None,
     ):
@@ -223,6 +240,8 @@ class LSFJobManager:
             on_status: Optional callback invoked on each status poll
         """
         validator = validator or FlowValidator(self.logger)
+        if poll_interval is None:
+            poll_interval = self.config.runner.poll_interval
 
         while True:
             status = self.get_status(job_id)
@@ -298,11 +317,15 @@ class FlowRunner:
         self.validator.validate_paths(job_inputs, "input")
 
         # Submit job
+        runner_cfg = self.job_manager.config.runner
+        queue = job.get("queue") or runner_cfg.default_queue
+        cpu = job.get("cpu", runner_cfg.default_cpu)
         job_id = self.job_manager.submit_job(
             job_name,
             job["command"],
-            queue=job.get("queue", "all"),
-            cpu=job.get("cpu", 1)
+            queue=queue,
+            cpu=cpu,
+            machine=job.get("machine", ""),
         )
 
         self._notify_job(
@@ -411,7 +434,7 @@ class FlowRunner:
             raise RuntimeError("Invalid flow configuration")
 
         flow_name = config["flow_name"]
-        poll_interval = config.get("poll_interval", 10)
+        poll_interval = config.get("poll_interval", self.job_manager.config.runner.poll_interval)
 
         self.logger.info(f"[FLOW START] {flow_name}")
 
@@ -428,7 +451,8 @@ class FlowRunner:
     def _create_unique_job_name(job_name: str) -> str:
         """Create unique job name with timestamp"""
         user = getpass.getuser()
-        ts = time.strftime("%Y%m%d_%H%M%S")
+        ts_format = get_config().lsf.job_name_timestamp_format
+        ts = time.strftime(ts_format)
         return f"{user}_{job_name}_{ts}"
 
 
@@ -448,11 +472,12 @@ if __name__ == "__main__":
     import sys
 
     # Load configuration
-    config_file = sys.argv[1] if len(sys.argv) > 1 else "flow.json"
-    
+    app_config = get_config()
+    config_file = sys.argv[1] if len(sys.argv) > 1 else app_config.runner.default_flow_file
+
     with open(config_file, "r") as fp:
         config = json.load(fp)
 
     # Create and run flow
-    runner = create_flow_runner(log_file="logs/flow_runner.log")
+    runner = create_flow_runner(log_file=app_config.runner.session_log_file)
     runner.run_flow(config)

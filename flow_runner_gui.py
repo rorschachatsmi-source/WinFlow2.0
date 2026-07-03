@@ -18,7 +18,9 @@ from datetime import datetime
 from collections import defaultdict, deque
 from typing import Dict, List, Optional, Set, Tuple
 
+from flow_graph import build_flow_graph_edges, compute_layers
 from flow_runner_core import create_flow_runner
+from winflow_config import get_config
 
 
 # ── Visual theme ──────────────────────────────────────────────────────────────
@@ -145,8 +147,9 @@ class CanvasTooltip:
 
 FAILED_STATUSES = {"EXIT", "failed", "KILLING", "killing"}
 RERUN_ELIGIBLE_STATUSES = {"EXIT", "failed"}
-KILL_CHECK_INTERVAL_MS = 15000
-MAX_KILL_ATTEMPTS = 4
+_APP_CFG = get_config()
+KILL_CHECK_INTERVAL_MS = _APP_CFG.runner.kill_poll_ms
+MAX_KILL_ATTEMPTS = _APP_CFG.runner.kill_max_retries
 JOB_NOT_FOUND_HINTS = (
     "not found",
     "no matching",
@@ -169,14 +172,12 @@ class FlowGraphModel:
         self._build()
 
     def _build(self):
-        output_producers: Dict[str, str] = {}
         node_map: Dict[str, Dict] = {}
 
         for stage in self.config.get("stages", []):
             stage_name = stage["name"]
             for task in stage.get("tasks", []):
                 task_name = task["name"]
-                prev_key: Optional[str] = None
                 for job in task.get("jobs", []):
                     job_key = f"{stage_name}/{task_name}/{job['name']}"
                     node = {
@@ -195,45 +196,9 @@ class FlowGraphModel:
                     self.nodes.append(node)
                     node_map[job_key] = node
 
-                    if prev_key:
-                        self.edges.append((prev_key, job_key))
-                    prev_key = job_key
-
-                    for inp in job.get("inputs", []):
-                        producer = output_producers.get(inp)
-                        if producer and producer != job_key:
-                            edge = (producer, job_key)
-                            if edge not in self.edges:
-                                self.edges.append(edge)
-
-                    for out in job.get("outputs", []):
-                        output_producers[out] = job_key
-
-        self._compute_layers(node_map)
-
-    def _compute_layers(self, node_map: Dict[str, Dict]):
-        in_degree = {n["key"]: 0 for n in self.nodes}
-        adj: Dict[str, List[str]] = defaultdict(list)
-        for src, dst in self.edges:
-            adj[src].append(dst)
-            in_degree[dst] = in_degree.get(dst, 0) + 1
-
-        queue = deque(k for k, d in in_degree.items() if d == 0)
-        layer_of: Dict[str, int] = {}
-
-        while queue:
-            key = queue.popleft()
-            layer = layer_of.get(key, 0)
-            self.layers[key] = layer
-            for nxt in adj[key]:
-                layer_of[nxt] = max(layer_of.get(nxt, 0), layer + 1)
-                in_degree[nxt] -= 1
-                if in_degree[nxt] == 0:
-                    queue.append(nxt)
-
-        for n in self.nodes:
-            if n["key"] not in self.layers:
-                self.layers[n["key"]] = 0
+        labeled_edges = build_flow_graph_edges(self.config.get("stages", []))
+        self.edges = [(src, dst) for src, dst, _label in labeled_edges]
+        self.layers = compute_layers(list(node_map.keys()), labeled_edges)
 
     def get_node(self, key: str) -> Optional[Dict]:
         for n in self.nodes:
@@ -717,7 +682,10 @@ class JobLogTailer:
     def start(self, lsf_name: str):
         self.stop()
         self._stop.clear()
-        self._paths = [Path(f"log/{lsf_name}.log"), Path(f"log/{lsf_name}.err")]
+        self._paths = [
+            Path(f"{get_config().runner.job_log_dir}/{lsf_name}.log"),
+            Path(f"{get_config().runner.job_log_dir}/{lsf_name}.err"),
+        ]
         self._offsets = {str(p): 0 for p in self._paths}
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -725,7 +693,7 @@ class JobLogTailer:
     def stop(self):
         self._stop.set()
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1)
+            self._thread.join(timeout=get_config().runner.thread_join_timeout_sec)
         self._thread = None
 
     def _run(self):
@@ -744,7 +712,7 @@ class JobLogTailer:
                         self.callback(kind, path.name, chunk)
                 except OSError:
                     pass
-            self._stop.wait(0.5)
+            self._stop.wait(get_config().runner.log_tail_interval_sec)
 
 
 # ── Job detail dialog ─────────────────────────────────────────────────────────
@@ -960,7 +928,9 @@ class FlowRunnerGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("WinFlow Runner")
-        self.root.geometry("1280x820")
+        gui_cfg = get_config().gui
+        runner_cfg = get_config().runner
+        self.root.geometry(gui_cfg.runner_window_size)
         self.root.minsize(960, 640)
         self.root.configure(bg=COLORS["bg"])
 
@@ -995,7 +965,7 @@ class FlowRunnerGUI:
         self.config_path_var.trace_add("write", self._on_config_path_changed)
 
     def _on_config_path_changed(self, *_args):
-        self.root.after(150, self._auto_load_graph)
+        self.root.after(get_config().runner.auto_load_delay_ms, self._auto_load_graph)
 
     def _init_paned_split(self):
         """Set initial 45/55 split between job flow and log panels."""
@@ -1021,7 +991,7 @@ class FlowRunnerGUI:
 
         tk.Label(inner_top, text="  Config:", bg=COLORS["panel"], fg=COLORS["muted"],
                  font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(20, 4))
-        self.config_path_var = tk.StringVar(value="flow.json")
+        self.config_path_var = tk.StringVar(value=runner_cfg.default_flow_file)
         tk.Entry(
             inner_top, textvariable=self.config_path_var, width=42,
             font=("Segoe UI", 9), relief=tk.FLAT, bg="#f6f8fa",
@@ -1362,7 +1332,8 @@ class FlowRunnerGUI:
         self.flow_log_messages = []
         self.job_log_messages = []
         deleted = 0
-        for directory in (Path("log"), Path("logs")):
+        runner_cfg = get_config().runner
+        for directory in (Path(runner_cfg.job_log_dir), Path(runner_cfg.session_log_dir)):
             if not directory.exists():
                 continue
             for path in directory.iterdir():
@@ -1421,12 +1392,12 @@ class FlowRunnerGUI:
         if not lsf_name:
             messagebox.showinfo("Info", "Job has not been submitted yet.")
             return
-        log_path = Path(f"log/{lsf_name}.log")
+        log_path = Path(f"{get_config().runner.job_log_dir}/{lsf_name}.log")
         if log_path.exists():
             try:
-                subprocess.Popen(["gvim", str(log_path)])
+                subprocess.Popen([get_config().runner.log_viewer, str(log_path)])
             except OSError as exc:
-                messagebox.showerror("Error", f"Failed to launch gvim:\n{exc}")
+                messagebox.showerror("Error", f"Failed to launch {get_config().runner.log_viewer}:\n{exc}")
         else:
             messagebox.showinfo("Info", f"Log not found: {log_path}")
 
@@ -1589,7 +1560,8 @@ class FlowRunnerGUI:
 
     def _run_flow_thread(self, config, job_filter=None):
         try:
-            log_file = f"logs/flow_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+            session_log_dir = get_config().runner.session_log_dir
+            log_file = f"{session_log_dir}/flow_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
             self.runner = create_flow_runner(
                 log_file=log_file,
                 log_callback=self._log_callback,

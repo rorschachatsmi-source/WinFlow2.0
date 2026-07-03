@@ -1,0 +1,96 @@
+{
+  "runner": {
+    "default_flow_file": "flow.json",
+    "session_log_dir": "logs",
+    "session_log_file": "logs/flow_runner.log",
+    "job_log_dir": "log",
+    "poll_interval": 20,
+    "default_queue": "tpdsd1",
+    "default_cpu": 4,
+    "logger_name": "FlowRunner",
+    "kill_poll_ms": 15000,
+    "kill_max_retries": 4,
+    "log_tail_interval_sec": 0.5,
+    "thread_join_timeout_sec": 1.0,
+    "log_viewer": "gvim",
+    "auto_load_delay_ms": 150
+  },
+  "lsf": {
+    "bsub": "bsub",
+    "bjobs": "bjobs",
+    "bkill": "bkill",
+    "bjobs_noheader": true,
+    "bjobs_output_field": "stat",
+    "job_name_timestamp_format": "%Y%m%d_%H%M%S"
+  },
+  "generator": {
+    "default_flow_type": "pv",
+    "default_setting_file": "setting.sh",
+    "default_blocks_file": "block_stream.list",
+    "default_output_file": "flow.json",
+    "poll_interval": 20,
+    "default_queue": "tpdsd1",
+    "default_cpu": 4,
+    "blank_flow_name": "custom_flow",
+    "new_job_cpu": 1
+  },
+  "pv": {
+    "flow_name": "PV",
+    "required_settings": ["TOP_MODULE", "MACHINE_QUEUE", "MACHINE_CPU"],
+    "paths": {
+      "laker_dir": "../LakerBZ",
+      "gds_dir": "../GDS",
+      "flow_dir": "../flow",
+      "data_dir": "../DATA"
+    },
+    "scripts": {
+      "sub_bzgdsin_apr": "sub_bzgdsin_apr.sh",
+      "sub_calibre_dm": "sub_calibre_dm.sh",
+      "bzgdsin_apr": "bzgdsin_apr.sh",
+      "pre_bzgdsin_apr": "pre_bzgdsin_apr.sh",
+      "bzgdsout_apr": "bzgdsout_apr.sh",
+      "laker_topLib": "laker_topLib.sh",
+      "bzgdsout_top": "bzgdsout_top.sh",
+      "gds2oas": "gds2oas.sh",
+      "laker_text": "laker_text.sh",
+      "run_drc": "run_drc"
+    },
+    "files": {
+      "apr_gds": "apr.gds.gz",
+      "laker_top_lib_tcl": "laker_topLib.tcl",
+      "sub_dmexcl_calibre": "sub_dmexcl.calibre",
+      "create_text_tcl": "create_text_from_APRgds.tcl",
+      "drc_report": "DRC.rep"
+    },
+    "merge_flags": [
+      {"setting_key": "FLAG_DMF", "script": "dmf", "tag": "DM"},
+      {"setting_key": "FLAG_DOD", "script": "dod", "tag": "DODPO"},
+      {"setting_key": "FLAG_DEX", "script": "dex", "tag": "DMEXCL"}
+    ]
+  },
+  "apr": {
+    "flow_name": "APR",
+    "stage_name": "APR",
+    "task_name": "apr",
+    "run_stage_template": "./run_stage {job_name}",
+    "output_template": "{job_name}/DB/{job_name}.enc.dat",
+    "stages_before_current": [
+      "01_floorplan",
+      "02_prects_opt",
+      "03_cts_concurrent"
+    ],
+    "current_stage": "04_postcts_opt",
+    "stages_after_current": [
+      "05_route.tcl",
+      "06_postroute_opt"
+    ],
+    "default_queue": "tpdsd1",
+    "default_cpu": "4"
+  },
+  "gui": {
+    "generator_window_size": "1280x800",
+    "generator_window_min": "960x640",
+    "runner_window_size": "1280x820",
+    "sidebar_min_width": 220
+  }
+}
