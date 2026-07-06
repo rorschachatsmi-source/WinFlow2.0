@@ -53,6 +53,7 @@ class PVPathsConfig:
     gds_dir: str = "../GDS"
     flow_dir: str = "../flow"
     data_dir: str = "../DATA"
+    spi_dir: str = "../spi"
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,9 @@ class PVScriptsConfig:
     gds2oas: str = "gds2oas.sh"
     laker_text: str = "laker_text.sh"
     run_drc: str = "run_drc"
+    spi: str = "run_spi.sh"
+    rcxt: str = "run_rcxt.sh"
+    lvs: str = "run_lvs.sh"
 
 
 @dataclass(frozen=True)
@@ -76,6 +80,14 @@ class PVFilesConfig:
     sub_dmexcl_calibre: str = "sub_dmexcl.calibre"
     create_text_tcl: str = "create_text_from_APRgds.tcl"
     drc_report: str = "DRC.rep"
+    spi_input_spi: str = "{top}.spi"
+    spi_input_netlist: str = "netlist.pg.v.gz"
+    spi_output: str = "{top}.cdl"
+    rcxt_output: str = "flag_starrc_done"
+    lvs_hcell: str = "hcell"
+    lvs_calibre: str = "lvs.calibre"
+    lvs_layout_spi: str = "layout.spi"
+    lvs_report: str = "lvs.rep"
 
 
 @dataclass(frozen=True)

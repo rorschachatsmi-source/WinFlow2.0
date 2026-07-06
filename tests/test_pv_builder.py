@@ -41,7 +41,7 @@ class TestPVFlowBuilder(unittest.TestCase):
         stage_names = [stage["name"] for stage in flow["stages"]]
         self.assertEqual(
             stage_names,
-            ["streamIn_sub", "streamIn_APR", "streamOut_APR", "Merge", "streamOut_TOP"],
+            ["streamIn_sub", "streamIn_APR", "streamOut_APR", "Merge", "streamOut_TOP", "DRC"],
         )
         self.assertEqual(flow["flow_name"], "PV")
         self.assertEqual(flow["poll_interval"], 20)
@@ -98,6 +98,7 @@ class TestPVFlowBuilder(unittest.TestCase):
                 "streamIn_APR",
                 "Merge",
                 "streamOut_TOP",
+                "DRC",
             ],
         )
 
@@ -107,17 +108,88 @@ class TestPVFlowBuilder(unittest.TestCase):
             blocks=[],
         )
         flow = PVFlowBuilder.build(context)
-        stream_out_top = flow["stages"][-1]
+        stream_out_top = next(s for s in flow["stages"] if s["name"] == "streamOut_TOP")
         gds2oas_job = stream_out_top["tasks"][0]["jobs"][2]
         self.assertIn("sm8466_top_post.oas", gds2oas_job["outputs"][0])
 
-    def test_build_appends_verify_when_enabled(self):
+    def test_build_verify_stage_when_drcbe_enabled(self):
         context = BuildContext(
             settings=base_settings(FLAG_DRCBE="1"),
             blocks=[],
         )
         flow = PVFlowBuilder.build(context)
         self.assertEqual(flow["stages"][-1]["name"], "Verify")
+        self.assertEqual(
+            [task["name"] for task in flow["stages"][-1]["tasks"]],
+            ["DRC_BE"],
+        )
+
+    def test_spi_runs_parallel_on_first_stream_in_stage(self):
+        context = BuildContext(
+            settings=base_settings(),
+            blocks=[{"name": "blk1", "workdir": "/w/blk1"}],
+        )
+        flow = PVFlowBuilder.build(context)
+        stream_in_sub = flow["stages"][0]
+        task_names = [task["name"] for task in stream_in_sub["tasks"]]
+        self.assertIn("SPI", task_names)
+        self.assertIn("blk1", task_names)
+
+    def test_spi_on_stream_in_apr_when_no_blocks(self):
+        context = BuildContext(settings=base_settings(), blocks=[])
+        flow = PVFlowBuilder.build(context)
+        stream_in_apr = flow["stages"][0]
+        task_names = [task["name"] for task in stream_in_apr["tasks"]]
+        self.assertEqual(task_names, ["sm8466_top_streamIn_APR", "SPI"])
+
+    def test_rcxt_runs_parallel_with_laker_toplib_when_flag_set(self):
+        context = BuildContext(
+            settings=base_settings(FLAG_DMF="1", FLAG_RCXT="1"),
+            blocks=[],
+        )
+        flow = PVFlowBuilder.build(context)
+        stream_out_top = next(s for s in flow["stages"] if s["name"] == "streamOut_TOP")
+        task_names = [task["name"] for task in stream_out_top["tasks"]]
+        self.assertIn("sm8466_top_streamOut_TOP", task_names)
+        self.assertIn("RCXT", task_names)
+        rcxt_job = next(t for t in stream_out_top["tasks"] if t["name"] == "RCXT")["jobs"][0]
+        self.assertEqual(rcxt_job["inputs"], ["../GDS/DM.gds"])
+
+    def test_rcxt_omitted_when_flag_off(self):
+        context = BuildContext(settings=base_settings(FLAG_DMF="1"), blocks=[])
+        flow = PVFlowBuilder.build(context)
+        stream_out_top = next(s for s in flow["stages"] if s["name"] == "streamOut_TOP")
+        self.assertEqual(len(stream_out_top["tasks"]), 1)
+
+    def test_lvs_parallel_with_drc_after_gds2oas(self):
+        context = BuildContext(
+            settings=base_settings(FLAG_DRCBE="1", FLAG_LVS="1"),
+            blocks=[],
+        )
+        flow = PVFlowBuilder.build(context)
+        post_stage = flow["stages"][-1]
+        self.assertEqual(post_stage["name"], "Verify")
+        task_names = [task["name"] for task in post_stage["tasks"]]
+        self.assertEqual(task_names, ["DRC_BE", "LVS"])
+        lvs_job = next(t for t in post_stage["tasks"] if t["name"] == "LVS")["jobs"][0]
+        self.assertEqual(lvs_job["command"], "../flow/run_lvs.sh")
+        self.assertEqual(
+            lvs_job["inputs"],
+            [
+                "hcell",
+                "lvs.calibre",
+                "layout.spi",
+                "../GDS/sm8466_top.oas",
+                "../spi/sm8466_top.cdl",
+            ],
+        )
+        self.assertEqual(lvs_job["outputs"], ["lvs.rep"])
+
+    def test_lvs_omitted_when_flag_off(self):
+        context = BuildContext(settings=base_settings(FLAG_DRCBE="1"), blocks=[])
+        flow = PVFlowBuilder.build(context)
+        post_stage = flow["stages"][-1]
+        self.assertEqual([task["name"] for task in post_stage["tasks"]], ["DRC_BE"])
 
 
 if __name__ == "__main__":

@@ -13,14 +13,15 @@ from winflow_config import get_config
 from flow_generator.flows.pv.stages import (
     block_blitz_outputs,
     build_merge_stage,
+    build_post_gds2oas_stage,
     pre_stream_in_apr_stage,
     stream_in_apr_stage,
     stream_in_sub_dummy_stage,
     stream_in_sub_stage,
     stream_out_apr_stage,
     stream_out_top_stage,
-    verify_stage,
 )
+from flow_generator.flows.pv.stages.spi_rcxt_lvs import add_spi_task
 
 
 @register("pv")
@@ -44,28 +45,33 @@ class PVFlowBuilder(FlowBuilder):
     @classmethod
     def build(cls, context: BuildContext) -> Flow:
         config = PVConfig.from_context(context)
+        settings = context.settings
         stages: List[Stage] = []
 
         if config.dmexcl_ptn:
-            stages.append(stream_in_sub_dummy_stage(context.blocks, config))
+            stages.append(
+                add_spi_task(stream_in_sub_dummy_stage(context.blocks, config), config)
+            )
             stages.append(pre_stream_in_apr_stage(context.blocks, config))
             stages.append(stream_out_apr_stage(config))
             stages.append(stream_in_apr_stage(config, input_from_stream_out=True))
         else:
             stream_in_sub = stream_in_sub_stage(context.blocks, config)
             if stream_in_sub is not None:
-                stages.append(stream_in_sub)
-            sub_outputs = block_blitz_outputs(context.blocks, config) if context.blocks else None
-            stages.append(stream_in_apr_stage(config, sub_outputs))
+                stages.append(add_spi_task(stream_in_sub, config))
+                sub_outputs = block_blitz_outputs(context.blocks, config)
+                stages.append(stream_in_apr_stage(config, sub_outputs))
+            else:
+                stages.append(add_spi_task(stream_in_apr_stage(config), config))
             stages.append(stream_out_apr_stage(config))
 
-        merge_stage, laker_outputs = build_merge_stage(context.settings, config)
+        merge_stage, laker_outputs = build_merge_stage(settings, config)
         stages.append(merge_stage)
-        stages.append(stream_out_top_stage(config, laker_outputs))
+        stages.append(stream_out_top_stage(config, laker_outputs, settings))
 
-        verify = verify_stage(context.settings, config)
-        if verify is not None:
-            stages.append(verify)
+        post_gds2oas = build_post_gds2oas_stage(settings, config)
+        if post_gds2oas is not None:
+            stages.append(post_gds2oas)
 
         pv_cfg = get_config().pv
         gen_cfg = get_config().generator

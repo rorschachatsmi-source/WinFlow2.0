@@ -15,6 +15,7 @@ class PVPaths:
     gds_dir: str
     flow_dir: str
     data_dir: str
+    spi_dir: str
 
     @classmethod
     def defaults(cls) -> "PVPaths":
@@ -30,4 +31,5 @@ class PVPaths:
             gds_dir=settings.get("GDS_DIR", base.gds_dir),
             flow_dir=settings.get("FLOW_DIR", base.flow_dir),
             data_dir=settings.get("DATA_DIR", base.data_dir),
+            spi_dir=settings.get("SPI_DIR", base.spi_dir),
         )

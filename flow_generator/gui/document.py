@@ -26,8 +26,11 @@ PV_PLACEHOLDER_SETTINGS = {
     "FLAG_DMF": "0",
     "FLAG_DOD": "0",
     "FLAG_DEX": "0",
+    "FLAG_DRC": "0",
     "FLAG_DRCBE": "0",
     "FLAG_DRCFE": "0",
+    "FLAG_LVS": "0",
+    "FLAG_RCXT": "0",
 }
 
 DEFAULT_QUEUE = get_config().generator.default_queue

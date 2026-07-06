@@ -453,6 +453,36 @@ blk1 /work/design/blk1
 blk2 /work/design/blk2
 ```
 
+### PV default flow jobs
+
+The generated PV flow includes optional jobs controlled by `setting.sh` flags. WinFlow schedules them using stage/task parallelism (tasks in the same stage run in parallel; stages run sequentially).
+
+| Job | Flag | Command | Inputs | Output | Placement |
+| --- | ---- | ------- | ------ | ------ | --------- |
+| **SPI** | *(always)* | `../flow/run_spi.sh` | `{TOP_MODULE}.spi`, `../DATA/netlist.pg.v.gz` | `{TOP_MODULE}.cdl` | First stream-in stage (parallel with `sub_laker` or `laker_In`) |
+| **RCXT** | `FLAG_RCXT=1` | `../flow/run_rcxt.sh` | `../GDS/DM.gds` (Calibre DMF output) | `flag_starrc_done` | `streamOut_TOP` stage (parallel with `laker_topLib`) |
+| **LVS** | `FLAG_LVS=1` | `../flow/run_lvs.sh` | `hcell`, `lvs.calibre`, `layout.spi`, `../GDS/{final_top}.oas`, `../spi/{TOP_MODULE}.cdl` | `lvs.rep` | Post-`gds2oas` stage (parallel with DRC tasks) |
+
+#### Post-gds2oas DRC stage
+
+After `gds2oas` completes, a final verification stage is added:
+
+| Stage name | Condition |
+| ---------- | --------- |
+| **DRC** | `FLAG_DRC=1`, or both `FLAG_DRCBE=0` and `FLAG_DRCFE=0` |
+| **Verify** | `FLAG_DRCBE=1` and/or `FLAG_DRCFE=1` while `FLAG_DRC=0` |
+
+Tasks within that stage (all parallel):
+
+| Task | Condition |
+| ---- | --------- |
+| Generic **DRC** (`run_drc DRC`) | Stage is named **DRC** |
+| **DRC_BE** | `FLAG_DRCBE=1` |
+| **DRC_FE** | `FLAG_DRCFE=1` |
+| **LVS** | `FLAG_LVS=1` |
+
+> **Note:** RCXT expects `DM.gds` from Calibre DMF. Enable `FLAG_DMF=1` and `FLAG_RCXT=1` when running RCXT.
+
 ### Generator GUI templates
 
 
