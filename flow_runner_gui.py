@@ -9,6 +9,7 @@ and per-job log tailing from log/*.
 import json
 import os
 import subprocess
+import sys
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -22,6 +23,11 @@ from flow_graph import build_flow_graph_edges, compute_layers
 from flow_runner_core import create_flow_runner
 from winflow_config import get_config
 
+# Segoe UI / Consolas are Windows fonts; missing glyphs on Linux X11 often trigger
+# RENDER RenderAddGlyphs BadLength errors. Use common Linux fonts as fallback.
+UI_FONT = "Segoe UI" if sys.platform == "win32" else "DejaVu Sans"
+MONO_FONT = "Consolas" if sys.platform == "win32" else "DejaVu Sans Mono"
+APP_BRAND = "WinFlow"
 
 # ── Visual theme ──────────────────────────────────────────────────────────────
 
@@ -132,7 +138,7 @@ class CanvasTooltip:
             foreground=COLORS["text"],
             relief=tk.SOLID,
             borderwidth=1,
-            font=("Segoe UI", 9),
+            font=(UI_FONT, 9),
             padx=8,
             pady=5,
         )
@@ -450,8 +456,8 @@ class FlowGraphCanvas(tk.Canvas):
         self._pulse_id: Optional[str] = None
         self._tooltip = CanvasTooltip(self)
         self._label_fonts = (
-            (9, tkfont.Font(family="Segoe UI", size=9, weight="bold")),
-            (8, tkfont.Font(family="Segoe UI", size=8, weight="bold")),
+            (9, tkfont.Font(family=UI_FONT, size=9, weight="bold")),
+            (8, tkfont.Font(family=UI_FONT, size=8, weight="bold")),
         )
         self.bind("<Configure>", lambda e: self.redraw())
 
@@ -572,7 +578,7 @@ class FlowGraphCanvas(tk.Canvas):
         h = self.winfo_height() or 200
         self.create_text(
             w // 2, h // 2, text=text,
-            fill=COLORS["muted"], font=("Segoe UI", 11)
+            fill=COLORS["muted"], font=(UI_FONT, 11)
         )
 
     def _layout(self):
@@ -637,13 +643,13 @@ class FlowGraphCanvas(tk.Canvas):
             title_y = y - (12 if line_count > 1 else 8)
             self.create_text(
                 x, title_y, text=display_label, fill=title_fill,
-                font=("Segoe UI", label_size, "bold"),
+                font=(UI_FONT, label_size, "bold"),
                 justify=tk.CENTER, anchor=tk.CENTER, tags=key,
             )
             status_txt = node["status"] if node["status"] != "pending" else "waiting"
             self.create_text(
                 x, y + 14, text=status_txt.upper(), fill=status_fill,
-                font=("Segoe UI", 7), tags=key
+                font=(UI_FONT, 7), tags=key
             )
             self._bind_node_click(key)
             self._bind_node_interactions(key, node)
@@ -664,7 +670,7 @@ class FlowGraphCanvas(tk.Canvas):
             x = self.PAD + col * (self.NODE_W + self.GAP_X) + self.NODE_W // 2
             self.create_text(
                 x, 14, text=stage, fill=COLORS["stage_label"],
-                font=("Segoe UI", 8, "italic")
+                font=(UI_FONT, 8, "italic")
             )
 
 # ── Job log tailer ────────────────────────────────────────────────────────────
@@ -741,7 +747,7 @@ class JobDetailDialog:
         self._add_section(body, "Job Output", "outputs")
 
         timing = tk.LabelFrame(
-            body, text=" Timing ", font=("Segoe UI", 9, "bold"),
+            body, text=" Timing ", font=(UI_FONT, 9, "bold"),
             bg=COLORS["panel"], fg=COLORS["text"], padx=10, pady=8
         )
         timing.pack(fill=tk.X, pady=(10, 0))
@@ -761,11 +767,11 @@ class JobDetailDialog:
         ]):
             tk.Label(
                 timing, text=f"{label}:", bg=COLORS["panel"],
-                font=("Segoe UI", 9), anchor=tk.W, width=12
+                font=(UI_FONT, 9), anchor=tk.W, width=12
             ).grid(row=row, column=0, sticky=tk.W, pady=2)
             tk.Label(
                 timing, textvariable=var, bg=COLORS["panel"],
-                font=("Consolas", 9), anchor=tk.W
+                font=(MONO_FONT, 9), anchor=tk.W
             ).grid(row=row, column=1, sticky=tk.W, pady=2)
 
         actions = tk.Frame(body, bg=COLORS["panel"])
@@ -773,20 +779,20 @@ class JobDetailDialog:
 
         self.stop_btn = tk.Button(
             actions, text="Stop Job", command=self._stop_job,
-            bg=COLORS["failed"], fg="white", font=("Segoe UI", 9, "bold"),
+            bg=COLORS["failed"], fg="white", font=(UI_FONT, 9, "bold"),
             relief=tk.FLAT, padx=12, pady=6
         )
         self.stop_btn.pack(side=tk.LEFT, padx=(0, 8))
 
         tk.Button(
             actions, text="Validate Job", command=self._validate_job,
-            bg=COLORS["accent"], fg="white", font=("Segoe UI", 9, "bold"),
+            bg=COLORS["accent"], fg="white", font=(UI_FONT, 9, "bold"),
             relief=tk.FLAT, padx=12, pady=6
         ).pack(side=tk.LEFT, padx=(0, 8))
 
         tk.Button(
             actions, text="Close", command=self._close,
-            font=("Segoe UI", 9), relief=tk.FLAT, padx=12, pady=6
+            font=(UI_FONT, 9), relief=tk.FLAT, padx=12, pady=6
         ).pack(side=tk.RIGHT)
 
         self.win.protocol("WM_DELETE_WINDOW", self._close)
@@ -795,12 +801,12 @@ class JobDetailDialog:
 
     def _add_section(self, parent, title: str, field: str):
         frame = tk.LabelFrame(
-            parent, text=f" {title} ", font=("Segoe UI", 9, "bold"),
+            parent, text=f" {title} ", font=(UI_FONT, 9, "bold"),
             bg=COLORS["panel"], fg=COLORS["text"], padx=8, pady=6
         )
         frame.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
         text = scrolledtext.ScrolledText(
-            frame, height=4, wrap=tk.WORD, font=("Consolas", 9),
+            frame, height=4, wrap=tk.WORD, font=(MONO_FONT, 9),
             bg="#f6f8fa", relief=tk.FLAT, state=tk.DISABLED
         )
         text.pack(fill=tk.BOTH, expand=True)
@@ -929,7 +935,6 @@ class FlowRunnerGUI:
         self.root = root
         self.root.title("WinFlow Runner")
         gui_cfg = get_config().gui
-        runner_cfg = get_config().runner
         self.root.geometry(gui_cfg.runner_window_size)
         self.root.minsize(960, 640)
         self.root.configure(bg=COLORS["bg"])
@@ -957,9 +962,9 @@ class FlowRunnerGUI:
         style = ttk.Style()
         style.theme_use("clam")
         style.configure("TNotebook", background=COLORS["bg"])
-        style.configure("TNotebook.Tab", padding=[12, 4], font=("Segoe UI", 9))
-        style.configure("Header.TLabel", font=("Segoe UI", 11, "bold"), background=COLORS["bg"])
-        style.configure("Status.TLabel", font=("Segoe UI", 9), background=COLORS["panel"])
+        style.configure("TNotebook.Tab", padding=[12, 4], font=(UI_FONT, 9))
+        style.configure("Header.TLabel", font=(UI_FONT, 11, "bold"), background=COLORS["bg"])
+        style.configure("Status.TLabel", font=(UI_FONT, 9), background=COLORS["panel"])
 
     def _bind_config_events(self):
         self.config_path_var.trace_add("write", self._on_config_path_changed)
@@ -985,21 +990,21 @@ class FlowRunnerGUI:
         inner_top.pack(fill=tk.X, padx=12, pady=10)
 
         tk.Label(
-            inner_top, text="⚡ WinFlow", font=("Segoe UI", 14, "bold"),
+            inner_top, text=APP_BRAND, font=(UI_FONT, 14, "bold"),
             bg=COLORS["panel"], fg=COLORS["accent"]
         ).pack(side=tk.LEFT)
 
         tk.Label(inner_top, text="  Config:", bg=COLORS["panel"], fg=COLORS["muted"],
-                 font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(20, 4))
-        self.config_path_var = tk.StringVar(value=runner_cfg.default_flow_file)
+                 font=(UI_FONT, 9)).pack(side=tk.LEFT, padx=(20, 4))
+        self.config_path_var = tk.StringVar(value=get_config().runner.default_flow_file)
         tk.Entry(
             inner_top, textvariable=self.config_path_var, width=42,
-            font=("Segoe UI", 9), relief=tk.FLAT, bg="#f6f8fa",
+            font=(UI_FONT, 9), relief=tk.FLAT, bg="#f6f8fa",
             highlightthickness=1, highlightbackground=COLORS["border"]
         ).pack(side=tk.LEFT, padx=2)
         tk.Button(
             inner_top, text="Browse", command=self._browse_config,
-            font=("Segoe UI", 9), relief=tk.FLAT, bg="#f6f8fa", padx=8
+            font=(UI_FONT, 9), relief=tk.FLAT, bg="#f6f8fa", padx=8
         ).pack(side=tk.LEFT, padx=4)
 
         sep = tk.Frame(self.root, height=1, bg=COLORS["border"])
@@ -1015,49 +1020,49 @@ class FlowRunnerGUI:
         rail.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 8))
         rail.pack_propagate(False)
 
-        tk.Label(rail, text="Control", font=("Segoe UI", 10, "bold"),
+        tk.Label(rail, text="Control", font=(UI_FONT, 10, "bold"),
                  bg=COLORS["panel"], fg=COLORS["text"]).pack(pady=(14, 8))
 
         self.run_btn = tk.Button(
             rail, text="▶  Run Flow", command=self._run_flow,
             bg=COLORS["done"], fg="white", width=14, height=2,
-            font=("Segoe UI", 9, "bold"), relief=tk.FLAT, cursor="hand2"
+            font=(UI_FONT, 9, "bold"), relief=tk.FLAT, cursor="hand2"
         )
         self.run_btn.pack(pady=6, padx=10)
 
         self.rerun_btn = tk.Button(
             rail, text="↻  Rerun", command=self._rerun_from_failure,
             bg="#bf8700", fg="white", width=14, height=2,
-            state=tk.DISABLED, font=("Segoe UI", 9, "bold"), relief=tk.FLAT
+            state=tk.DISABLED, font=(UI_FONT, 9, "bold"), relief=tk.FLAT
         )
         self.rerun_btn.pack(pady=6, padx=10)
 
         self.stop_btn = tk.Button(
             rail, text="⏹  Stop", command=self._stop_flow,
             bg=COLORS["failed"], fg="white", width=14, height=2,
-            state=tk.DISABLED, font=("Segoe UI", 9, "bold"), relief=tk.FLAT
+            state=tk.DISABLED, font=(UI_FONT, 9, "bold"), relief=tk.FLAT
         )
         self.stop_btn.pack(pady=6, padx=10)
 
         tk.Button(
             rail, text="🗑  Clear Logs", command=self._clear_logs,
             bg=COLORS["accent"], fg="white", width=14, height=2,
-            font=("Segoe UI", 9, "bold"), relief=tk.FLAT
+            font=(UI_FONT, 9, "bold"), relief=tk.FLAT
         ).pack(pady=6, padx=10)
 
         status_box = tk.LabelFrame(
-            rail, text=" Status ", font=("Segoe UI", 8),
+            rail, text=" Status ", font=(UI_FONT, 8),
             bg=COLORS["panel"], fg=COLORS["muted"], padx=8, pady=6
         )
         status_box.pack(pady=16, padx=8, fill=tk.X)
         self.status_label = tk.Label(
             status_box, text="Ready", fg=COLORS["done"],
-            font=("Segoe UI", 9, "bold"), bg=COLORS["panel"], wraplength=120
+            font=(UI_FONT, 9, "bold"), bg=COLORS["panel"], wraplength=120
         )
         self.status_label.pack()
 
         filter_box = tk.LabelFrame(
-            rail, text=" Log Filter ", font=("Segoe UI", 8),
+            rail, text=" Log Filter ", font=(UI_FONT, 8),
             bg=COLORS["panel"], fg=COLORS["muted"], padx=8, pady=4
         )
         filter_box.pack(pady=4, padx=8, fill=tk.X)
@@ -1071,7 +1076,7 @@ class FlowRunnerGUI:
         ]:
             tk.Checkbutton(
                 filter_box, text=label, variable=var, bg=COLORS["panel"],
-                font=("Segoe UI", 8), command=self._update_log_display
+                font=(UI_FONT, 8), command=self._update_log_display
             ).pack(anchor=tk.W)
 
         # Right main area — vertical split (drag sash to resize graph vs logs)
@@ -1083,7 +1088,7 @@ class FlowRunnerGUI:
 
         # Graph panel
         graph_frame = tk.LabelFrame(
-            self.main_paned, text=" Job Flow (left → right) ", font=("Segoe UI", 9, "bold"),
+            self.main_paned, text=" Job Flow (left → right) ", font=(UI_FONT, 9, "bold"),
             bg=COLORS["panel"], fg=COLORS["text"], padx=4, pady=4
         )
         self.main_paned.add(graph_frame, weight=1)
@@ -1116,7 +1121,7 @@ class FlowRunnerGUI:
         self.log_notebook.add(runner_tab, text="  Runner Log (logs/*)  ")
 
         self.flow_log_text = scrolledtext.ScrolledText(
-            runner_tab, wrap=tk.WORD, font=("Consolas", 9),
+            runner_tab, wrap=tk.WORD, font=(MONO_FONT, 9),
             bg="#f6f8fa", relief=tk.FLAT, state=tk.DISABLED
         )
         self.flow_log_text.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
@@ -1128,22 +1133,22 @@ class FlowRunnerGUI:
         job_toolbar = tk.Frame(job_tab, bg=COLORS["panel"])
         job_toolbar.pack(fill=tk.X, padx=4, pady=(4, 0))
         tk.Label(job_toolbar, text="Job:", bg=COLORS["panel"],
-                 font=("Segoe UI", 9)).pack(side=tk.LEFT)
+                 font=(UI_FONT, 9)).pack(side=tk.LEFT)
         self.job_selector_var = tk.StringVar(value="(auto-follow active job)")
         self.job_selector = ttk.Combobox(
             job_toolbar, textvariable=self.job_selector_var,
-            state="readonly", width=50, font=("Segoe UI", 9)
+            state="readonly", width=50, font=(UI_FONT, 9)
         )
         self.job_selector.pack(side=tk.LEFT, padx=6)
         self.job_selector.bind("<<ComboboxSelected>>", self._on_job_selected)
 
         tk.Button(
             job_toolbar, text="Open log file", command=self._open_job_log_file,
-            font=("Segoe UI", 8), relief=tk.FLAT
+            font=(UI_FONT, 8), relief=tk.FLAT
         ).pack(side=tk.LEFT, padx=4)
 
         self.job_log_text = scrolledtext.ScrolledText(
-            job_tab, wrap=tk.WORD, font=("Consolas", 9),
+            job_tab, wrap=tk.WORD, font=(MONO_FONT, 9),
             bg="#1e1e1e", fg="#d4d4d4", relief=tk.FLAT, state=tk.DISABLED,
             insertbackground="#d4d4d4"
         )
@@ -1169,7 +1174,7 @@ class FlowRunnerGUI:
         self.progress_bar.pack(fill=tk.X, padx=12, pady=(10, 4))
 
         self.stats_label = tk.Label(
-            bottom, text="Ready to run", font=("Segoe UI", 9),
+            bottom, text="Ready to run", font=(UI_FONT, 9),
             bg=COLORS["panel"], fg=COLORS["muted"], anchor=tk.W
         )
         self.stats_label.pack(anchor=tk.W, padx=12, pady=(0, 8))
