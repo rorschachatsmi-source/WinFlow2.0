@@ -152,7 +152,8 @@ class CanvasTooltip:
 
 
 FAILED_STATUSES = {"EXIT", "failed", "KILLING", "killing"}
-RERUN_ELIGIBLE_STATUSES = {"EXIT", "failed"}
+DONE_STATUSES = {"DONE", "done"}
+RERUN_BLOCKING_STATUSES = {"RUN", "running", "KILLING", "killing"}
 _APP_CFG = get_config()
 KILL_CHECK_INTERVAL_MS = _APP_CFG.runner.kill_poll_ms
 MAX_KILL_ATTEMPTS = _APP_CFG.runner.kill_max_retries
@@ -1238,19 +1239,23 @@ class FlowRunnerGUI:
         self._update_stats()
         self._update_action_buttons()
 
-    def _find_first_failed_index(self) -> Optional[int]:
+    def _has_rerun_blocking_status(self) -> bool:
         if not self.graph_model:
-            return None
-        for idx, node in enumerate(self.graph_model.nodes):
-            if node.get("status") in RERUN_ELIGIBLE_STATUSES:
-                return idx
-        return None
+            return False
+        return any(
+            node.get("status") in RERUN_BLOCKING_STATUSES
+            for node in self.graph_model.nodes
+        )
 
     def _update_action_buttons(self):
-        failed_idx = self._find_first_failed_index()
         if self.rerun_btn:
-            state = tk.NORMAL if failed_idx is not None and not self.is_running else tk.DISABLED
-            self.rerun_btn.config(state=state)
+            can_rerun = (
+                bool(self.graph_model and self.graph_model.nodes)
+                and not self.is_running
+                and not self._has_rerun_blocking_status()
+                and not self.kill_monitor.targets
+            )
+            self.rerun_btn.config(state=tk.NORMAL if can_rerun else tk.DISABLED)
 
         alive = self.job_registry.alive_entries()
         has_kill_targets = bool(self.kill_monitor.targets)
@@ -1475,16 +1480,18 @@ class FlowRunnerGUI:
 
     # ── Run flow ──────────────────────────────────────────────────────────────
 
-    def _start_flow(self, config: Dict, job_filter=None, reset_from_index: Optional[int] = None):
+    def _start_flow(self, config: Dict, job_filter=None, reset_incomplete: bool = False):
         """Shared launcher for full run and rerun."""
-        if reset_from_index is None:
+        if not reset_incomplete:
             self.graph_model = FlowGraphModel(config)
             self.graph_canvas.set_model(self.graph_model)
             self.graph_canvas.reset()
             self.completed_jobs = 0
             self.progress_var.set(0)
         else:
-            for node in self.graph_model.nodes[reset_from_index:]:
+            for node in self.graph_model.nodes:
+                if node.get("status") in DONE_STATUSES:
+                    continue
                 node.update(
                     status="pending",
                     lsf_name="",
@@ -1494,7 +1501,7 @@ class FlowRunnerGUI:
                 )
             self.completed_jobs = sum(
                 1 for node in self.graph_model.nodes
-                if node.get("status") in ("DONE", "done")
+                if node.get("status") in DONE_STATUSES
             )
             if self.total_jobs:
                 self.progress_var.set(100 * self.completed_jobs / self.total_jobs)
@@ -1540,28 +1547,37 @@ class FlowRunnerGUI:
             messagebox.showerror("Error", f"Unable to load config: {self.config_path_var.get()}")
             return
 
-        failed_idx = self._find_first_failed_index()
-        if failed_idx is None:
-            messagebox.showinfo("Rerun", "No failed jobs to rerun.")
+        if not self.graph_model or not self.graph_model.nodes:
+            messagebox.showinfo("Rerun", "No jobs loaded.")
             return
 
-        failed_node = self.graph_model.nodes[failed_idx]
+        if self.is_running or self._has_rerun_blocking_status() or self.kill_monitor.targets:
+            messagebox.showinfo(
+                "Rerun",
+                "Cannot rerun while a job is RUN or KILLING.",
+            )
+            return
+
         skip_keys = {
             node["key"]
-            for node in self.graph_model.nodes[:failed_idx]
-            if node.get("status") in ("DONE", "done")
+            for node in self.graph_model.nodes
+            if node.get("status") in DONE_STATUSES
         }
+        rerun_count = len(self.graph_model.nodes) - len(skip_keys)
+        if rerun_count == 0:
+            messagebox.showinfo("Rerun", "All jobs are DONE. Nothing to rerun.")
+            return
 
         def job_filter(job_key: str) -> bool:
             return job_key not in skip_keys
 
         self.flow_config = config
         self._log_callback(
-            f"Rerun from failed job: {failed_node['label']} "
-            f"(skipping {len(skip_keys)} completed job(s))",
+            f"Rerun: {rerun_count} failed/waiting job(s), "
+            f"skipping {len(skip_keys)} DONE job(s)",
             "INFO",
         )
-        self._start_flow(config, job_filter=job_filter, reset_from_index=failed_idx)
+        self._start_flow(config, job_filter=job_filter, reset_incomplete=True)
 
     def _run_flow_thread(self, config, job_filter=None):
         try:
