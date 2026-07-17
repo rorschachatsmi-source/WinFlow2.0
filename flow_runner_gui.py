@@ -20,6 +20,7 @@ from collections import defaultdict, deque
 from typing import Dict, List, Optional, Set, Tuple
 
 from flow_graph import build_flow_graph_edges, compute_layers
+from flow_generator.core.io import write_flow
 from flow_runner_core import create_flow_runner
 from winflow_config import get_config
 
@@ -727,7 +728,7 @@ class JobLogTailer:
 class JobDetailDialog:
     """Popup window with job metadata and actions."""
 
-    def __init__(self, parent: tk.Tk, gui: "FlowRunnerGUI", job_key: str):
+    def __init__(self, parent: tk.Misc, gui: "FlowRunnerGUI", job_key: str):
         self.gui = gui
         self.job_key = job_key
         self._timer_id: Optional[str] = None
@@ -932,13 +933,23 @@ class JobDetailDialog:
 class FlowRunnerGUI:
     """GUI for Flow Runner with DAG view and unified logging."""
 
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Misc, sync_source=None):
         self.root = root
-        self.root.title("WinFlow Runner")
-        gui_cfg = get_config().gui
-        self.root.geometry(gui_cfg.runner_window_size)
-        self.root.minsize(960, 640)
-        self.root.configure(bg=COLORS["bg"])
+        self.window = root.winfo_toplevel()
+        self.sync_source = sync_source
+        self._owns_window = isinstance(root, tk.Tk)
+
+        if self._owns_window:
+            self.root.title("WinFlow Runner")
+            gui_cfg = get_config().gui
+            self.root.geometry(gui_cfg.runner_window_size)
+            self.root.minsize(960, 640)
+            self.root.configure(bg=COLORS["bg"])
+        else:
+            try:
+                self.root.configure(bg=COLORS["bg"])
+            except tk.TclError:
+                pass
 
         self.runner = None
         self.flow_log_messages: List[Tuple[str, str, str]] = []
@@ -953,6 +964,8 @@ class FlowRunnerGUI:
         self._detail_dialog: Optional[JobDetailDialog] = None
         self.job_registry = JobRegistry()
         self.kill_monitor = JobKillMonitor(self)
+        self.sync_btn: Optional[tk.Button] = None
+        self._suppress_auto_load = False
 
         self._setup_styles()
         self._setup_ui()
@@ -971,6 +984,8 @@ class FlowRunnerGUI:
         self.config_path_var.trace_add("write", self._on_config_path_changed)
 
     def _on_config_path_changed(self, *_args):
+        if self._suppress_auto_load:
+            return
         self.root.after(get_config().runner.auto_load_delay_ms, self._auto_load_graph)
 
     def _init_paned_split(self):
@@ -1174,11 +1189,32 @@ class FlowRunnerGUI:
         )
         self.progress_bar.pack(fill=tk.X, padx=12, pady=(10, 4))
 
+        bottom_row = tk.Frame(bottom, bg=COLORS["panel"])
+        bottom_row.pack(fill=tk.X, padx=12, pady=(0, 8))
+
         self.stats_label = tk.Label(
-            bottom, text="Ready to run", font=(UI_FONT, 9),
+            bottom_row, text="Ready to run", font=(UI_FONT, 9),
             bg=COLORS["panel"], fg=COLORS["muted"], anchor=tk.W
         )
-        self.stats_label.pack(anchor=tk.W, padx=12, pady=(0, 8))
+        self.stats_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.sync_btn = tk.Button(
+            bottom_row,
+            text="↻ Sync from Generator",
+            command=self._sync_from_generator,
+            font=(UI_FONT, 9, "bold"),
+            relief=tk.FLAT,
+            bg=COLORS["accent"],
+            fg="white",
+            padx=12,
+            pady=4,
+            state=tk.DISABLED,
+        )
+        if self.sync_source is not None:
+            self.sync_btn.pack(side=tk.RIGHT)
+            self._update_sync_button()
+        else:
+            self.sync_btn = None
 
     # ── Config / graph ────────────────────────────────────────────────────────
 
@@ -1263,6 +1299,86 @@ class FlowRunnerGUI:
             self.stop_btn.config(
                 state=tk.NORMAL if (alive or has_kill_targets) else tk.DISABLED
             )
+        self._update_sync_button()
+
+    def _can_sync(self) -> bool:
+        if self.sync_source is None:
+            return False
+        if self.is_running:
+            return False
+        if self._has_rerun_blocking_status():
+            return False
+        if self.kill_monitor.targets:
+            return False
+        if self.job_registry.alive_entries():
+            return False
+        return True
+
+    def _update_sync_button(self):
+        if not self.sync_btn:
+            return
+        self.sync_btn.config(state=tk.NORMAL if self._can_sync() else tk.DISABLED)
+
+    def _sync_from_generator(self):
+        parent = self.window
+        if not self._can_sync():
+            messagebox.showinfo(
+                "Sync",
+                "Cannot sync while a job is running, queued as RUN, or being killed.",
+                parent=parent,
+            )
+            return
+        if self.sync_source is None:
+            return
+
+        try:
+            flow = self.sync_source.get_flow_dict()
+        except ValueError as exc:
+            messagebox.showerror("Sync failed", str(exc), parent=parent)
+            return
+        except Exception as exc:
+            messagebox.showerror(
+                "Sync failed",
+                f"Unable to read generator flow:\n{exc}",
+                parent=parent,
+            )
+            return
+
+        out = self.sync_source.get_output_path()
+        try:
+            write_flow(flow, out)
+        except OSError as exc:
+            messagebox.showerror(
+                "Sync failed",
+                f"Unable to write flow file:\n{exc}",
+                parent=parent,
+            )
+            return
+
+        # Point runner at the written file without the auto-load path that
+        # preserves prior job statuses.
+        self._suppress_auto_load = True
+        try:
+            self.config_path_var.set(str(out))
+        finally:
+            self._suppress_auto_load = False
+
+        self.flow_config = flow
+        self.graph_model = FlowGraphModel(flow)
+        self.graph_canvas.set_model(self.graph_model)
+        self.graph_canvas.reset()
+        self.completed_jobs = 0
+        self.total_jobs = len(self.graph_model.nodes)
+        self.progress_var.set(0)
+        self._refresh_job_selector()
+        self._update_stats()
+        self._update_action_buttons()
+        self._update_status("Synced", COLORS["accent"])
+        self._log_callback(
+            f"Synced flow from Generator → {out} "
+            f"({self.total_jobs} job(s); all statuses reset to pending)",
+            "INFO",
+        )
 
     def _request_kill_entries(self, entries: List[Dict]):
         if not entries:
@@ -1283,7 +1399,7 @@ class FlowRunnerGUI:
     def _open_job_detail(self, job_key: str):
         if self._detail_dialog and self._detail_dialog.win.winfo_exists():
             self._detail_dialog._close()
-        self._detail_dialog = JobDetailDialog(self.root, self, job_key)
+        self._detail_dialog = JobDetailDialog(self.window, self, job_key)
 
     def _refresh_job_selector(self):
         if not self.graph_model:
@@ -1510,12 +1626,12 @@ class FlowRunnerGUI:
         self.total_jobs = len(self.graph_model.nodes)
         self._refresh_job_selector()
         self._update_stats()
-        self._update_action_buttons()
 
         self.is_running = True
         self.run_btn.config(state=tk.DISABLED)
         self.rerun_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
+        self._update_action_buttons()
         self._update_status("Running…", COLORS["running"])
 
         thread = threading.Thread(
@@ -1622,7 +1738,7 @@ class FlowRunnerGUI:
         self.status_label.config(text=status, fg=color)
 
     def run(self):
-        self.root.mainloop()
+        self.window.mainloop()
 
 
 def main():

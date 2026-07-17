@@ -83,7 +83,7 @@ FONTS = {
 }
 
 
-def _setup_styles(root: tk.Tk) -> ttk.Style:
+def _setup_styles(root: tk.Misc) -> ttk.Style:
     style = ttk.Style(root)
     try:
         style.theme_use("vista")
@@ -861,19 +861,16 @@ class JobEditorDialog(tk.Toplevel):
         self.destroy()
 
 
-class FlowGeneratorApp(tk.Tk):
+class FlowGeneratorPanel(ttk.Frame):
+    """Embeddable flow generator UI (usable inside a notebook or standalone window)."""
+
     PANE_RATIO_LEFT = 2
     PANE_RATIO_RIGHT = 5
 
-    def __init__(self):
-        super().__init__()
-        gui_cfg = get_config().gui
+    def __init__(self, master: tk.Misc, **kwargs):
+        _setup_styles(master.winfo_toplevel())
+        super().__init__(master, style="App.TFrame", **kwargs)
         gen_cfg = get_config().generator
-        self.title("WinFlow Generator")
-        self.geometry(gui_cfg.generator_window_size)
-        self.minsize(*map(int, gui_cfg.generator_window_min.split("x")))
-        self.configure(bg=COLORS["bg"])
-        _setup_styles(self)
 
         self.document = blank_document()
         self.output_path = tk.StringVar(value=gen_cfg.default_output_file)
@@ -885,6 +882,17 @@ class FlowGeneratorApp(tk.Tk):
         self._build_ui()
         self.canvas.set_document(self.document)
         self._sync_header_fields()
+
+    def _dialog_parent(self) -> tk.Misc:
+        return self.winfo_toplevel()
+
+    def get_flow_dict(self) -> dict:
+        """Return the current in-memory document as a runnable flow dict."""
+        self._apply_header_fields()
+        return document_to_flow(self.document)
+
+    def get_output_path(self) -> Path:
+        return Path(self.output_path.get().strip() or "flow.json")
 
     def _build_ui(self):
         header = ttk.Frame(self, style="Header.TFrame", padding=(16, 12))
@@ -993,7 +1001,7 @@ class FlowGeneratorApp(tk.Tk):
         if mode == "add":
             err = link_jobs(self.document, src, dst)
             if err:
-                messagebox.showerror("Link failed", err, parent=self)
+                messagebox.showerror("Link failed", err, parent=self._dialog_parent())
                 return
             self._set_status("Dependency added")
         else:
@@ -1051,6 +1059,7 @@ class FlowGeneratorApp(tk.Tk):
 
     def _browse_output(self):
         path = filedialog.asksaveasfilename(
+            parent=self._dialog_parent(),
             defaultextension=".json",
             filetypes=[("Flow JSON", "*.json"), ("All", "*.*")],
             initialfile=self.output_path.get() or "flow.json",
@@ -1074,13 +1083,13 @@ class FlowGeneratorApp(tk.Tk):
 
     def _load_template(self):
         name = self.template_var.get()
-        opts = TemplateLoadDialog.ask(self, name)
+        opts = TemplateLoadDialog.ask(self._dialog_parent(), name)
         if opts is None:
             return
         try:
             self.document = apply_template(name, opts)
         except (KeyError, ValueError) as exc:
-            messagebox.showerror("Template error", str(exc), parent=self)
+            messagebox.showerror("Template error", str(exc), parent=self._dialog_parent())
             return
         self._sync_header_fields()
         self.canvas.set_document(self.document)
@@ -1088,6 +1097,7 @@ class FlowGeneratorApp(tk.Tk):
 
     def _open_flow(self):
         path = filedialog.askopenfilename(
+            parent=self._dialog_parent(),
             filetypes=[("Flow JSON", "*.json"), ("All", "*.*")],
         )
         if not path:
@@ -1098,7 +1108,7 @@ class FlowGeneratorApp(tk.Tk):
             self.document = flow_to_document(data)
             self.output_path.set(path)
         except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
-            messagebox.showerror("Open failed", str(exc), parent=self)
+            messagebox.showerror("Open failed", str(exc), parent=self._dialog_parent())
             return
         self._sync_header_fields()
         self.canvas.set_document(self.document)
@@ -1118,10 +1128,11 @@ class FlowGeneratorApp(tk.Tk):
 
     def _delete_job(self):
         key = self.canvas.selected_key
+        parent = self._dialog_parent()
         if not key:
-            messagebox.showinfo("Delete job", "Select a job node first.", parent=self)
+            messagebox.showinfo("Delete job", "Select a job node first.", parent=parent)
             return
-        if not messagebox.askyesno("Delete job", "Remove the selected job?", parent=self):
+        if not messagebox.askyesno("Delete job", "Remove the selected job?", parent=parent):
             return
         self.document.remove_job(key)
         self.canvas.set_document(self.document)
@@ -1133,10 +1144,11 @@ class FlowGeneratorApp(tk.Tk):
         self._set_status("Auto layout applied")
 
     def _export_flow(self):
+        parent = self._dialog_parent()
         try:
             self._apply_header_fields()
         except ValueError as exc:
-            messagebox.showerror("Invalid settings", str(exc), parent=self)
+            messagebox.showerror("Invalid settings", str(exc), parent=parent)
             return
 
         missing = []
@@ -1150,19 +1162,19 @@ class FlowGeneratorApp(tk.Tk):
                 + ("…" if len(missing) > 8 else "")
                 + "\n\nExport anyway?"
             )
-            if not messagebox.askyesno("Incomplete jobs", warn, parent=self):
+            if not messagebox.askyesno("Incomplete jobs", warn, parent=parent):
                 return
 
-        out = Path(self.output_path.get().strip() or "flow.json")
+        out = self.get_output_path()
         try:
             flow = document_to_flow(self.document)
             write_flow(flow, out)
         except OSError as exc:
-            messagebox.showerror("Export failed", str(exc), parent=self)
+            messagebox.showerror("Export failed", str(exc), parent=parent)
             return
 
         self._set_status(f"Exported {out.resolve()}")
-        messagebox.showinfo("Export complete", f"Wrote runnable flow to:\n{out.resolve()}", parent=self)
+        messagebox.showinfo("Export complete", f"Wrote runnable flow to:\n{out.resolve()}", parent=parent)
 
     def _on_node_select(self, key: Optional[str]):
         self.detail.config(state=tk.NORMAL)
@@ -1213,6 +1225,7 @@ class FlowGeneratorApp(tk.Tk):
         if not found:
             return
         stage, task, job = found
+        parent = self._dialog_parent()
 
         def on_save(payload: dict):
             new_stage = payload["stage"] or stage
@@ -1233,16 +1246,30 @@ class FlowGeneratorApp(tk.Tk):
             new_key = self.document.update_job(key, new_stage, new_task, updated)  # type: ignore[arg-type]
             err = set_job_parents(self.document, new_key, payload.get("parent_keys", []))
             if err:
-                messagebox.showerror("Parent assignment failed", err, parent=self)
+                messagebox.showerror("Parent assignment failed", err, parent=parent)
                 return
             self.canvas.set_document(self.document)
             self.canvas.select(new_key)
             self._set_status(f"Updated job {payload['name']}")
 
-        JobEditorDialog(self, self.document, key, stage, task, dict(job), on_save)
+        JobEditorDialog(parent, self.document, key, stage, task, dict(job), on_save)
 
     def _set_status(self, text: str):
         self.status_var.set(text)
+
+
+class FlowGeneratorApp(tk.Tk):
+    """Standalone window wrapping FlowGeneratorPanel."""
+
+    def __init__(self):
+        super().__init__()
+        gui_cfg = get_config().gui
+        self.title("WinFlow Generator")
+        self.geometry(gui_cfg.generator_window_size)
+        self.minsize(*map(int, gui_cfg.generator_window_min.split("x")))
+        self.configure(bg=COLORS["bg"])
+        self.panel = FlowGeneratorPanel(self)
+        self.panel.pack(fill=tk.BOTH, expand=True)
 
 
 def blank_document() -> FlowDocument:

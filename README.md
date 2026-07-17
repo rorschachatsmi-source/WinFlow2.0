@@ -60,7 +60,15 @@ python flow_runner_core.py flow.json
 
 When no argument is given, the default flow file from `config.json` (`runner.default_flow_file`, currently `flow.json`) is used.
 
-### 3. Run with the runner GUI
+### 3. Run with the unified GUI (recommended)
+
+```bash
+python winflow_gui.py
+```
+
+One window with **Runner** and **Generator** tabs. Build a flow in Generator, then use **Sync from Generator** on the Runner tab to load it and reset all job statuses (only while no jobs are running).
+
+### 4. Run with the runner GUI only
 
 ```bash
 python flow_runner_gui.py
@@ -68,14 +76,14 @@ python flow_runner_gui.py
 
 Load a config, inspect the job DAG, then click **Run Flow**.
 
-### 4. Generate a flow (CLI)
+### 5. Generate a flow (CLI)
 
 ```bash
 python -m flow_generator --flow pv --setting setting.sh --blocks block_stream.list -o flow.json
 python -m flow_generator --list          # list registered flow types (pv, apr)
 ```
 
-### 5. Generate a flow (GUI)
+### 6. Generate a flow (GUI only)
 
 ```bash
 python flow_generator_gui.py
@@ -92,9 +100,10 @@ WinFlow2.0/
 │   ├── models.py
 │   └── loader.py
 ├── flow_runner_core.py         # Core engine + CLI entry point
-├── flow_runner_gui.py          # Runner Tkinter GUI
+├── flow_runner_gui.py          # Runner Tkinter GUI (standalone or tab)
+├── winflow_gui.py              # Unified Runner + Generator notebook GUI
 ├── flow_generator.py           # Thin wrapper → flow_generator.cli
-├── flow_generator_gui.py       # Visual flow editor
+├── flow_generator_gui.py       # Visual flow editor (standalone or tab)
 ├── flow_graph.py               # Shared DAG layout (runner + generator GUIs)
 ├── flow.json                   # Active flow config (default for runners)
 ├── flow_generator/             # Flow generation package
@@ -523,6 +532,15 @@ Log directories are configurable via `runner.job_log_dir` and `runner.session_lo
 The runner GUI **Clear Logs** button removes files under both log directories.
 
 ## GUI controls
+
+### Unified GUI (`winflow_gui.py`)
+
+
+| Control                  | Action                                                                 |
+| ------------------------ | ---------------------------------------------------------------------- |
+| **Runner / Generator tabs** | Switch between run view and visual editor                           |
+| **Sync from Generator**  | Apply Generator’s in-memory flow into Runner; writes `flow.json`, resets all job statuses; disabled while any job is running / RUN / KILLING |
+
 
 ### Runner GUI (`flow_runner_gui.py`)
 
