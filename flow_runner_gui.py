@@ -1023,6 +1023,22 @@ class FlowRunnerGUI:
             font=(UI_FONT, 9), relief=tk.FLAT, bg="#f6f8fa", padx=8
         ).pack(side=tk.LEFT, padx=4)
 
+        self.sync_btn = None
+        if self.sync_source is not None:
+            self.sync_btn = tk.Button(
+                inner_top,
+                text="↻ Sync from Generator",
+                command=self._sync_from_generator,
+                font=(UI_FONT, 9, "bold"),
+                relief=tk.FLAT,
+                bg=COLORS["accent"],
+                fg="white",
+                padx=10,
+                state=tk.DISABLED,
+            )
+            self.sync_btn.pack(side=tk.LEFT, padx=(8, 0))
+            self._update_sync_button()
+
         sep = tk.Frame(self.root, height=1, bg=COLORS["border"])
         sep.pack(fill=tk.X, padx=10)
 
@@ -1178,44 +1194,6 @@ class FlowRunnerGUI:
             ]:
                 widget.tag_configure(level, foreground=color)
 
-        # Bottom bar
-        bottom = tk.Frame(self.root, bg=COLORS["panel"],
-                          highlightthickness=1, highlightbackground=COLORS["border"])
-        bottom.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(0, 10))
-
-        self.progress_var = tk.DoubleVar(value=0)
-        self.progress_bar = ttk.Progressbar(
-            bottom, variable=self.progress_var, maximum=100, mode="determinate"
-        )
-        self.progress_bar.pack(fill=tk.X, padx=12, pady=(10, 4))
-
-        bottom_row = tk.Frame(bottom, bg=COLORS["panel"])
-        bottom_row.pack(fill=tk.X, padx=12, pady=(0, 8))
-
-        self.stats_label = tk.Label(
-            bottom_row, text="Ready to run", font=(UI_FONT, 9),
-            bg=COLORS["panel"], fg=COLORS["muted"], anchor=tk.W
-        )
-        self.stats_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        self.sync_btn = tk.Button(
-            bottom_row,
-            text="↻ Sync from Generator",
-            command=self._sync_from_generator,
-            font=(UI_FONT, 9, "bold"),
-            relief=tk.FLAT,
-            bg=COLORS["accent"],
-            fg="white",
-            padx=12,
-            pady=4,
-            state=tk.DISABLED,
-        )
-        if self.sync_source is not None:
-            self.sync_btn.pack(side=tk.RIGHT)
-            self._update_sync_button()
-        else:
-            self.sync_btn = None
-
     # ── Config / graph ────────────────────────────────────────────────────────
 
     def _browse_config(self):
@@ -1269,10 +1247,7 @@ class FlowRunnerGUI:
                 1 for node in self.graph_model.nodes
                 if node.get("status") in ("DONE", "done", "EXIT", "failed")
             )
-            if self.total_jobs:
-                self.progress_var.set(100 * self.completed_jobs / self.total_jobs)
         self._refresh_job_selector()
-        self._update_stats()
         self._update_action_buttons()
 
     def _has_rerun_blocking_status(self) -> bool:
@@ -1369,9 +1344,7 @@ class FlowRunnerGUI:
         self.graph_canvas.reset()
         self.completed_jobs = 0
         self.total_jobs = len(self.graph_model.nodes)
-        self.progress_var.set(0)
         self._refresh_job_selector()
-        self._update_stats()
         self._update_action_buttons()
         self._update_status("Synced", COLORS["accent"])
         self._log_callback(
@@ -1475,7 +1448,7 @@ class FlowRunnerGUI:
             w.config(state=tk.DISABLED)
         self.current_lsf_name = ""
         self._update_status("Ready", COLORS["done"])
-        self.stats_label.config(text=f"Logs cleared, deleted {deleted} files")
+        self._log_callback(f"Logs cleared, deleted {deleted} files", "INFO")
 
     def _on_job_selected(self, _event=None):
         if not self.graph_model:
@@ -1571,13 +1544,9 @@ class FlowRunnerGUI:
 
         if event == "job_done":
             self.completed_jobs += 1
-            self._update_stats()
-            if self.total_jobs:
-                self.progress_var.set(100 * self.completed_jobs / self.total_jobs)
 
         if event == "job_failed":
             self.completed_jobs += 1
-            self._update_stats()
             self._update_status("Failed", COLORS["failed"])
 
         if (
@@ -1589,11 +1558,6 @@ class FlowRunnerGUI:
 
         self._update_action_buttons()
 
-    def _update_stats(self):
-        self.stats_label.config(
-            text=f"Jobs: {self.completed_jobs}/{self.total_jobs} completed"
-        )
-
     # ── Run flow ──────────────────────────────────────────────────────────────
 
     def _start_flow(self, config: Dict, job_filter=None, reset_incomplete: bool = False):
@@ -1603,7 +1567,6 @@ class FlowRunnerGUI:
             self.graph_canvas.set_model(self.graph_model)
             self.graph_canvas.reset()
             self.completed_jobs = 0
-            self.progress_var.set(0)
         else:
             for node in self.graph_model.nodes:
                 if node.get("status") in DONE_STATUSES:
@@ -1619,13 +1582,10 @@ class FlowRunnerGUI:
                 1 for node in self.graph_model.nodes
                 if node.get("status") in DONE_STATUSES
             )
-            if self.total_jobs:
-                self.progress_var.set(100 * self.completed_jobs / self.total_jobs)
             self.graph_canvas.redraw()
 
         self.total_jobs = len(self.graph_model.nodes)
         self._refresh_job_selector()
-        self._update_stats()
 
         self.is_running = True
         self.run_btn.config(state=tk.DISABLED)

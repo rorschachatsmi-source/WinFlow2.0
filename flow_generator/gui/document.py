@@ -178,6 +178,60 @@ class FlowDocument:
             stage["tasks"] = [task for task in stage["tasks"] if task["jobs"]]
         self.stages = [stage for stage in self.stages if stage["tasks"]]
 
+    def _unique_task_name(self, stage: Stage, base: str) -> str:
+        existing = {task["name"] for task in stage["tasks"]}
+        if base not in existing:
+            return base
+        index = 2
+        while f"{base}_{index}" in existing:
+            index += 1
+        return f"{base}_{index}"
+
+    def _relocate_key(self, old_key: JobKey, new_key: JobKey) -> None:
+        if old_key == new_key:
+            return
+        if old_key in self.positions:
+            self.positions[new_key] = self.positions.pop(old_key)
+        elif new_key not in self.positions:
+            self.positions[new_key] = auto_layout_position(self, new_key)
+
+    def find_job_index(self, key: JobKey) -> Optional[Tuple[Stage, Task, int]]:
+        stage_name, task_name, job_name = key.split("\0")
+        for stage in self.stages:
+            if stage["name"] != stage_name:
+                continue
+            for task in stage["tasks"]:
+                if task["name"] != task_name:
+                    continue
+                for index, job in enumerate(task["jobs"]):
+                    if job["name"] == job_name:
+                        return stage, task, index
+        return None
+
+    def move_job(
+        self,
+        key: JobKey,
+        stage_name: str,
+        task_name: str,
+        index: Optional[int] = None,
+    ) -> JobKey:
+        """Move a job to another stage/task (optionally at index). Returns new key."""
+        located = self.find_job_index(key)
+        if not located:
+            return key
+        _stage, task, old_index = located
+        job = task["jobs"].pop(old_index)
+        self._prune_empty()
+
+        stage = self._ensure_stage(stage_name)
+        dest_task = self._ensure_task(stage, task_name)
+        insert_at = len(dest_task["jobs"]) if index is None else max(0, min(index, len(dest_task["jobs"])))
+        dest_task["jobs"].insert(insert_at, job)
+
+        new_key = _job_key(stage_name, task_name, job["name"])
+        self._relocate_key(key, new_key)
+        return new_key
+
     def update_job(
         self,
         key: JobKey,

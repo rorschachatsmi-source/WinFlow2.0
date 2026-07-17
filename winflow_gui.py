@@ -11,7 +11,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import ttk
 
-from flow_generator_gui import FlowGeneratorPanel
+from flow_generator_gui import FlowGeneratorPanel, COLORS as GEN_COLORS
 from flow_runner_gui import FlowRunnerGUI, COLORS, UI_FONT
 from winflow_config import get_config
 
@@ -32,14 +32,23 @@ class WinFlowApp(tk.Tk):
             style.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure("TNotebook", background=COLORS["bg"])
-        style.configure("TNotebook.Tab", padding=[16, 6], font=(UI_FONT, 10))
+        style.configure("TNotebook", background=COLORS["bg"], borderwidth=0)
+        style.configure(
+            "TNotebook.Tab",
+            padding=[18, 8],
+            font=(UI_FONT, 10),
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", COLORS["panel"]), ("!selected", COLORS["bg"])],
+            foreground=[("selected", COLORS["text"]), ("!selected", COLORS["muted"])],
+        )
 
         notebook = ttk.Notebook(self)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
         runner_tab = tk.Frame(notebook, bg=COLORS["bg"])
-        generator_tab = tk.Frame(notebook, bg=COLORS["bg"])
+        generator_tab = tk.Frame(notebook, bg=GEN_COLORS["bg"])
         notebook.add(runner_tab, text="  Runner  ")
         notebook.add(generator_tab, text="  Generator  ")
 

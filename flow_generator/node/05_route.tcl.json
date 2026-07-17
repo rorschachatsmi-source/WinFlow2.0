@@ -1,0 +1,26 @@
+{
+  "flow_name": "APR",
+  "poll_interval": 20,
+  "stages": [
+    {
+      "name": "stage_1",
+      "tasks": [
+        {
+          "name": "task_1",
+          "jobs": [
+            {
+              "name": "05_route.tcl",
+              "command": "./run_stage 05_route.tcl",
+              "queue": "tpdsd1",
+              "cpu": 4,
+              "inputs": [],
+              "outputs": [
+                "05_route.tcl/DB/05_route.tcl.enc.dat"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "flow_name": "PV",
+  "poll_interval": 20,
+  "stages": [
+    {
+      "name": "stage_1",
+      "tasks": [
+        {
+          "name": "task_1",
+          "jobs": [
+            {
+              "name": "BLOCK_laker",
+              "command": "../flow/sub_bzgdsin_apr.sh BLOCK workdir",
+              "queue": "tpdsd1",
+              "cpu": 4,
+              "inputs": [
+                "workdir/GDS/BLOCK.gds.gz"
+              ],
+              "outputs": [
+                "../LakerBZ/BLOCK.blitz++"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

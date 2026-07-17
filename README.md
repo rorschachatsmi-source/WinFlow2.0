@@ -66,7 +66,7 @@ When no argument is given, the default flow file from `config.json` (`runner.def
 python winflow_gui.py
 ```
 
-One window with **Runner** and **Generator** tabs. Build a flow in Generator, then use **Sync from Generator** on the Runner tab to load it and reset all job statuses (only while no jobs are running).
+One window with **Runner** and **Generator** tabs. Build a flow in Generator, then click **Sync from Generator** (next to Browse on the Runner top bar) to load it and reset all job statuses (only while no jobs are running).
 
 ### 4. Run with the runner GUI only
 
@@ -112,7 +112,8 @@ WinFlow2.0/
 │   ├── flows/
 │   │   ├── pv/                 # PV flow builder + stage modules
 │   │   └── apr/                # APR flow builder
-│   ├── gui/                    # FlowDocument, templates, graph layout
+│   ├── gui/                    # FlowDocument, templates, graph layout, job nodes
+│   ├── node/                   # Predefined Add-Job templates (*.json)
 │   └── parsers/                # setting.sh and block_stream.list parsers
 ├── example_flow/               # Sample scripts for a minimal demo pipeline
 ├── log/                        # Per-job LSF stdout/stderr (created at runtime)
@@ -539,7 +540,7 @@ The runner GUI **Clear Logs** button removes files under both log directories.
 | Control                  | Action                                                                 |
 | ------------------------ | ---------------------------------------------------------------------- |
 | **Runner / Generator tabs** | Switch between run view and visual editor                           |
-| **Sync from Generator**  | Apply Generator’s in-memory flow into Runner; writes `flow.json`, resets all job statuses; disabled while any job is running / RUN / KILLING |
+| **Sync from Generator**  | Top bar (next to Browse): apply Generator’s in-memory flow into Runner; writes `flow.json`, resets all job statuses; disabled while any job is running / RUN / KILLING |
 
 
 ### Runner GUI (`flow_runner_gui.py`)
@@ -559,10 +560,10 @@ The runner GUI **Clear Logs** button removes files under both log directories.
 
 | Control              | Action                                                    |
 | -------------------- | --------------------------------------------------------- |
+| **Add / Edit Job**   | Pick a predefined node from `flow_generator/node/*.json` (or blank), then edit |
+| **Drag nodes**       | Reorder jobs within a task and arrange the canvas         |
 | **Load Template**    | Load Blank, PV, or APR template with LSF resource options |
 | **Export flow.json** | Write the current document as runnable JSON               |
-| **Drag nodes**       | Reorder jobs within a task and arrange the canvas         |
-| **Add / Edit Job**   | Create or modify job command, queue, CPU, inputs, outputs |
 
 
 ## Tests

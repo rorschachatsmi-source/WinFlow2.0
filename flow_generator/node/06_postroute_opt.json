@@ -1,0 +1,26 @@
+{
+  "flow_name": "APR",
+  "poll_interval": 20,
+  "stages": [
+    {
+      "name": "stage_1",
+      "tasks": [
+        {
+          "name": "task_1",
+          "jobs": [
+            {
+              "name": "06_postroute_opt",
+              "command": "./run_stage 06_postroute_opt",
+              "queue": "tpdsd1",
+              "cpu": 4,
+              "inputs": [],
+              "outputs": [
+                "06_postroute_opt/DB/06_postroute_opt.enc.dat"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
