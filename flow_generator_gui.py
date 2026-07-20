@@ -12,6 +12,7 @@ Visual editor for WinFlow flow.json documents.
 from __future__ import annotations
 
 import json
+import sys
 import tkinter as tk
 import tkinter.font as tkfont
 from pathlib import Path
@@ -35,6 +36,11 @@ from flow_generator.gui.graph import JobGraph, build_job_graph
 from flow_generator.gui.nodes import list_nodes_by_flow, load_node, node_dir, node_summary
 from winflow_config import get_config
 
+# Segoe UI / Cascadia Mono are Windows fonts; missing glyphs on Linux X11 often
+# trigger RENDER RenderAddGlyphs BadLength errors. Use Linux-safe fallbacks.
+# Avoid emoji / astral Unicode in labels — color-emoji font fallback crashes Tk.
+UI_FONT = "Segoe UI" if sys.platform == "win32" else "DejaVu Sans"
+MONO_FONT = "Cascadia Mono" if sys.platform == "win32" else "DejaVu Sans Mono"
 # ── Visual theme (aligned with Runner flat style) ─────────────────────────────
 
 COLORS = {
@@ -87,15 +93,68 @@ COLORS = {
 }
 
 FONTS = {
-    "title": ("Segoe UI", 14, "bold"),
-    "subtitle": ("Segoe UI", 9),
-    "section": ("Segoe UI", 10, "bold"),
-    "body": ("Segoe UI", 9),
-    "mono": ("Cascadia Mono", 9),
-    "node": ("Segoe UI", 9, "bold"),
-    "hint": ("Segoe UI", 8),
-    "toolbar": ("Segoe UI", 9),
+    "title": (UI_FONT, 14, "bold"),
+    "subtitle": (UI_FONT, 9),
+    "section": (UI_FONT, 10, "bold"),
+    "body": (UI_FONT, 9),
+    "mono": (MONO_FONT, 9),
+    "node": (UI_FONT, 9, "bold"),
+    "hint": (UI_FONT, 8),
+    "toolbar": (UI_FONT, 9),
+    "bold": (UI_FONT, 9, "bold"),
 }
+
+
+def _rebuild_fonts() -> None:
+    """Refresh FONTS tuples after UI_FONT / MONO_FONT may have changed."""
+    global FONTS
+    FONTS = {
+        "title": (UI_FONT, 14, "bold"),
+        "subtitle": (UI_FONT, 9),
+        "section": (UI_FONT, 10, "bold"),
+        "body": (UI_FONT, 9),
+        "mono": (MONO_FONT, 9),
+        "node": (UI_FONT, 9, "bold"),
+        "hint": (UI_FONT, 8),
+        "toolbar": (UI_FONT, 9),
+        "bold": (UI_FONT, 9, "bold"),
+    }
+
+
+def configure_safe_tk_fonts(root: tk.Misc) -> None:
+    """Pin Tk named fonts so fontconfig does not fall back to Noto Color Emoji."""
+    global UI_FONT, MONO_FONT
+    available = {name.lower(): name for name in tkfont.families(root)}
+
+    def _pick(candidates):
+        for name in candidates:
+            hit = available.get(name.lower())
+            if hit:
+                return hit
+        return candidates[0]
+
+    if sys.platform == "win32":
+        UI_FONT = _pick(("Segoe UI", "Arial", "Tahoma"))
+        MONO_FONT = _pick(("Cascadia Mono", "Consolas", "Courier New"))
+    else:
+        UI_FONT = _pick(("DejaVu Sans", "Liberation Sans", "FreeSans", "Helvetica"))
+        MONO_FONT = _pick(("DejaVu Sans Mono", "Liberation Mono", "FreeMono", "Courier"))
+
+    for font_name, family, size in (
+        ("TkDefaultFont", UI_FONT, 9),
+        ("TkTextFont", UI_FONT, 9),
+        ("TkMenuFont", UI_FONT, 9),
+        ("TkHeadingFont", UI_FONT, 10),
+        ("TkCaptionFont", UI_FONT, 9),
+        ("TkSmallCaptionFont", UI_FONT, 8),
+        ("TkTooltipFont", UI_FONT, 8),
+        ("TkFixedFont", MONO_FONT, 9),
+    ):
+        try:
+            tkfont.nametofont(font_name).configure(family=family, size=size)
+        except tk.TclError:
+            pass
+    _rebuild_fonts()
 
 
 def _setup_styles(root: tk.Misc) -> ttk.Style:
@@ -127,7 +186,7 @@ def _setup_styles(root: tk.Misc) -> ttk.Style:
     )
     style.configure(
         "Accent.TButton",
-        font=("Segoe UI", 9, "bold"),
+        font=(UI_FONT, 9, "bold"),
         padding=(14, 6),
     )
     style.configure(
@@ -162,7 +221,7 @@ def _flat_button(
         parent,
         text=text,
         command=command,
-        font=FONTS["toolbar"] if not primary else ("Segoe UI", 9, "bold"),
+        font=FONTS["toolbar"] if not primary else (UI_FONT, 9, "bold"),
         relief=tk.FLAT,
         bg=bg,
         fg=fg,
@@ -202,7 +261,7 @@ def _set_flat_toggle(btn: tk.Button, active: bool) -> None:
             bg=COLORS["btn_active"],
             fg=COLORS["btn_active_fg"],
             highlightbackground=COLORS["accent"],
-            font=("Segoe UI", 9, "bold"),
+            font=(UI_FONT, 9, "bold"),
         )
     else:
         btn._flat_bg = COLORS["btn"]  # type: ignore[attr-defined]
@@ -387,7 +446,7 @@ class FlowEditorCanvas(tk.Canvas):
 
         jobs = list(self.document.iter_jobs())
         if not jobs:
-            self._draw_placeholder("No jobs yet — add a job or load a template")
+            self._draw_placeholder("No jobs yet - add a job or load a template")
             return
 
         self._graph = build_job_graph(self.document)
@@ -439,12 +498,12 @@ class FlowEditorCanvas(tk.Canvas):
             cy - 18,
             text=text,
             fill=COLORS["text"],
-            font=("Segoe UI", 11),
+            font=(UI_FONT, 11),
         )
         self.create_text(
             cx,
             cy + 14,
-            text="Load Template  ·  Open flow.json  ·  Add Job",
+            text="Load Template  |  Open flow.json  |  Add Job",
             fill=COLORS["muted"],
             font=FONTS["hint"],
         )
@@ -507,7 +566,7 @@ class FlowEditorCanvas(tk.Canvas):
                 12,
                 text=stage_name,
                 fill=COLORS["stage_label"],
-                font=("Segoe UI", 8, "bold"),
+                font=(UI_FONT, 8, "bold"),
                 tags="band",
             )
             self.tag_lower("band")
@@ -526,7 +585,7 @@ class FlowEditorCanvas(tk.Canvas):
                 26,
                 text=label,
                 fill=COLORS["muted"],
-                font=("Segoe UI", 7, "italic"),
+                font=(UI_FONT, 7, "italic"),
             )
 
     def _draw_edges(self, active_edges: Optional[Set[Tuple[str, str]]] = None):
@@ -569,7 +628,7 @@ class FlowEditorCanvas(tk.Canvas):
             smooth=False,
             tags=edge_tag,
         )
-        short = label if len(label) <= 22 else label[:20] + "…"
+        short = label if len(label) <= 22 else label[:20] + "..."
         self.create_text(
             mid,
             (y1 + y2) / 2 - 8,
@@ -625,9 +684,9 @@ class FlowEditorCanvas(tk.Canvas):
         label = job["name"]
         max_label_w = self.NODE_W - 22
         if self._label_font.measure(label) > max_label_w:
-            while label and self._label_font.measure(label + "…") > max_label_w:
+            while label and self._label_font.measure(label + "...") > max_label_w:
                 label = label[:-1]
-            label = (label + "…") if label else "…"
+            label = (label + "...") if label else "..."
         self.create_text(x + 2, y - 16, text=label, fill=COLORS["text"], font=self._label_font, tags=key)
 
         meta_parts = [task]
@@ -637,16 +696,16 @@ class FlowEditorCanvas(tk.Canvas):
             meta_parts.append(f"-m {job['machine']}")
         self.create_text(
             x + 2, y + 2,
-            text=" · ".join(meta_parts),
+            text=" | ".join(meta_parts),
             fill=COLORS["muted"],
             font=FONTS["hint"],
             tags=key,
         )
         cpu = job.get("cpu", 1)
-        rel = f"↑{parent_count}  ↓{child_count}" if (parent_count or child_count) else "no deps"
+        rel = f"^{parent_count}  v{child_count}" if (parent_count or child_count) else "no deps"
         self.create_text(
             x + 2, y + 20,
-            text=f"{cpu} CPU  ·  {rel}",
+            text=f"{cpu} CPU  |  {rel}",
             fill=COLORS["accent_dark"] if role != "normal" else COLORS["muted"],
             font=FONTS["hint"],
             tags=key,
@@ -815,7 +874,7 @@ class TemplateLoadDialog(tk.Toplevel):
             )
             ttk.Label(
                 apr_frame,
-                text='Prepended as "_prefix" on each stage name (e.g. prefix "top" → 01_floorplan_top)',
+                text='Prepended as "_prefix" on each stage name (e.g. prefix "top" -> 01_floorplan_top)',
                 style="Muted.TLabel",
                 wraplength=400,
             ).pack(anchor="w", pady=(6, 0))
@@ -838,7 +897,7 @@ class TemplateLoadDialog(tk.Toplevel):
         ttk.Entry(inner, textvariable=var, width=48).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(
             inner,
-            text="Browse…",
+            text="Browse...",
             command=lambda: self._browse(var, filetypes),
         ).pack(side=tk.LEFT, padx=(6, 0))
 
@@ -895,7 +954,7 @@ class AddJobDialog(tk.Toplevel):
         ttk.Label(outer, text="Add job from library", style="Panel.TLabel", font=FONTS["section"]).pack(anchor="w")
         ttk.Label(
             outer,
-            text=f"Pick a predefined node grouped by flow · {node_dir()}",
+            text=f"Pick a predefined node grouped by flow | {node_dir()}",
             style="Muted.TLabel",
         ).pack(anchor="w", pady=(4, 12))
 
@@ -1138,6 +1197,7 @@ class FlowGeneratorPanel(tk.Frame):
     PANE_RATIO_RIGHT = 5
 
     def __init__(self, master: tk.Misc, **kwargs):
+        configure_safe_tk_fonts(master.winfo_toplevel())
         _setup_styles(master.winfo_toplevel())
         super().__init__(master, bg=COLORS["bg"], **kwargs)
         gen_cfg = get_config().generator
@@ -1188,7 +1248,7 @@ class FlowGeneratorPanel(tk.Frame):
         ).pack(side=tk.LEFT, padx=(6, 0))
         tk.Label(
             inner,
-            text="Design job DAGs · link dependencies · export flow.json",
+            text="Design job DAGs | link dependencies | export flow.json",
             bg=COLORS["panel"],
             fg=COLORS["muted"],
             font=FONTS["subtitle"],
@@ -1215,13 +1275,13 @@ class FlowGeneratorPanel(tk.Frame):
         ).pack(side=tk.LEFT, padx=(6, 8))
 
         _flat_button(tools, "Load", self._load_template).pack(side=tk.LEFT, padx=3)
-        _flat_button(tools, "Open…", self._open_flow).pack(side=tk.LEFT, padx=3)
+        _flat_button(tools, "Open...", self._open_flow).pack(side=tk.LEFT, padx=3)
 
         tk.Frame(tools, width=1, bg=COLORS["sep"]).pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=2)
 
         _flat_button(tools, "Add Job", self._add_job).pack(side=tk.LEFT, padx=3)
         _flat_button(tools, "Delete", self._delete_job, danger=True).pack(side=tk.LEFT, padx=3)
-        self._link_btn = _flat_button(tools, "Link →", lambda: self._set_link_mode("add"))
+        self._link_btn = _flat_button(tools, "Link ->", lambda: self._set_link_mode("add"))
         self._link_btn.pack(side=tk.LEFT, padx=3)
         self._unlink_btn = _flat_button(tools, "Unlink", lambda: self._set_link_mode("remove"))
         self._unlink_btn.pack(side=tk.LEFT, padx=3)
@@ -1257,7 +1317,7 @@ class FlowGeneratorPanel(tk.Frame):
         hint_row.pack(fill=tk.X, pady=(0, 6))
         self._canvas_hint = tk.Label(
             hint_row,
-            text="Drag to rearrange · Double-click to edit · Esc cancels link",
+            text="Drag to rearrange | Double-click to edit | Esc cancels link",
             bg=COLORS["panel"],
             fg=COLORS["muted"],
             font=FONTS["hint"],
@@ -1307,7 +1367,7 @@ class FlowGeneratorPanel(tk.Frame):
         status_wrap.pack(fill=tk.X, side=tk.BOTTOM, padx=10, pady=(0, 10))
         status = tk.Frame(status_wrap, bg=COLORS["panel"])
         status.pack(fill=tk.X, padx=12, pady=7)
-        self.status_var = tk.StringVar(value="Ready — load a template or open an existing flow.json")
+        self.status_var = tk.StringVar(value="Ready - load a template or open an existing flow.json")
         self.meta_var = tk.StringVar(value="0 jobs")
         tk.Label(
             status,
@@ -1322,7 +1382,7 @@ class FlowGeneratorPanel(tk.Frame):
             textvariable=self.meta_var,
             bg=COLORS["panel"],
             fg=COLORS["text"],
-            font=("Segoe UI", 8, "bold"),
+            font=(UI_FONT, 8, "bold"),
             anchor="e",
         ).pack(side=tk.RIGHT)
 
@@ -1356,17 +1416,17 @@ class FlowGeneratorPanel(tk.Frame):
         if hasattr(self, "_canvas_hint"):
             if mode == "add":
                 self._canvas_hint.config(
-                    text="Link: click parent → child  ·  Esc cancels",
+                    text="Link: click parent -> child  |  Esc cancels",
                     fg=COLORS["accent_dark"],
                 )
             elif mode == "remove":
                 self._canvas_hint.config(
-                    text="Unlink: click parent → child  ·  Esc cancels",
+                    text="Unlink: click parent -> child  |  Esc cancels",
                     fg=COLORS["warning"],
                 )
             else:
                 self._canvas_hint.config(
-                    text="Drag to rearrange · Double-click to edit · Esc cancels link",
+                    text="Drag to rearrange | Double-click to edit | Esc cancels link",
                     fg=COLORS["muted"],
                 )
 
@@ -1381,7 +1441,7 @@ class FlowGeneratorPanel(tk.Frame):
                 messagebox.showerror("Link failed", err, parent=self._dialog_parent())
                 return
             detail = f" ({'; '.join(notes)})" if notes else ""
-            self._set_status(f"Linked {parent_name} → {child_name}{detail}")
+            self._set_status(f"Linked {parent_name} -> {child_name}{detail}")
             select_key = new_child_key
         else:
             parent = self.document.get_job(src)
@@ -1392,7 +1452,7 @@ class FlowGeneratorPanel(tk.Frame):
             detail = f" ({'; '.join(notes)})" if notes else ""
             if not notes:
                 detail = " (no dependency to remove)"
-            self._set_status(f"Unlinked {parent_name} → {child_name}{detail}")
+            self._set_status(f"Unlinked {parent_name} -> {child_name}{detail}")
             select_key = new_child_key
 
         self._update_link_buttons(None)
@@ -1446,7 +1506,7 @@ class FlowGeneratorPanel(tk.Frame):
             highlightbackground=COLORS["border"],
             highlightcolor=COLORS["accent"],
         ).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        _flat_button(out_row, "…", self._browse_output, padx=8, pady=3).pack(side=tk.LEFT, padx=(4, 0))
+        _flat_button(out_row, "...", self._browse_output, padx=8, pady=3).pack(side=tk.LEFT, padx=(4, 0))
         form.columnconfigure(0, weight=1)
 
         job_card, job_body = _card(parent, "Selected job")
@@ -1478,7 +1538,7 @@ class FlowGeneratorPanel(tk.Frame):
             wrap=tk.WORD,
         )
         self.detail.pack(fill=tk.BOTH, expand=True)
-        _flat_button(job_body, "Edit job…", self._edit_selected).pack(fill=tk.X, pady=(10, 0))
+        _flat_button(job_body, "Edit job...", self._edit_selected).pack(fill=tk.X, pady=(10, 0))
 
     def _browse_output(self):
         path = filedialog.asksaveasfilename(
@@ -1604,7 +1664,7 @@ class FlowGeneratorPanel(tk.Frame):
             warn = (
                 f"{len(missing)} job(s) have no command:\n"
                 + ", ".join(missing[:8])
-                + ("…" if len(missing) > 8 else "")
+                + ("..." if len(missing) > 8 else "")
                 + "\n\nExport anyway?"
             )
             if not messagebox.askyesno("Incomplete jobs", warn, parent=parent):
@@ -1652,24 +1712,24 @@ class FlowGeneratorPanel(tk.Frame):
             lines.append("parents:")
             for parent_key in parents:
                 p_stage, p_task, p_name = parent_key.split("\0")
-                lines.append(f"  ↑ {p_name}  ({p_stage}/{p_task})")
+                lines.append(f"  ^ {p_name}  ({p_stage}/{p_task})")
         if children:
             lines.append("")
             lines.append("children:")
             for child_key in children:
                 c_stage, c_task, c_name = child_key.split("\0")
-                lines.append(f"  ↓ {c_name}  ({c_stage}/{c_task})")
+                lines.append(f"  v {c_name}  ({c_stage}/{c_task})")
         lines.append("")
         lines.append("inputs:")
         inputs = job.get("inputs", [])
         if inputs:
-            lines.extend(f"  · {p}" for p in inputs)
+            lines.extend(f"  | {p}" for p in inputs)
         else:
             lines.append("  (none)")
         lines.append("outputs:")
         outputs = job.get("outputs", [])
         if outputs:
-            lines.extend(f"  · {p}" for p in outputs)
+            lines.extend(f"  | {p}" for p in outputs)
         else:
             lines.append("  (none)")
         self.detail.insert("1.0", "\n".join(lines))
@@ -1724,7 +1784,7 @@ class FlowGeneratorPanel(tk.Frame):
         n_jobs = len(jobs)
         n_stages = len(self.document.stages) if self.document else 0
         n_tasks = sum(len(s.get("tasks", [])) for s in (self.document.stages if self.document else []))
-        self.meta_var.set(f"{n_stages} stages  ·  {n_tasks} tasks  ·  {n_jobs} jobs")
+        self.meta_var.set(f"{n_stages} stages  |  {n_tasks} tasks  |  {n_jobs} jobs")
 
 
 class FlowGeneratorApp(tk.Tk):
@@ -1732,6 +1792,7 @@ class FlowGeneratorApp(tk.Tk):
 
     def __init__(self):
         super().__init__()
+        configure_safe_tk_fonts(self)
         gui_cfg = get_config().gui
         self.title("WinFlow Generator")
         self.geometry(gui_cfg.generator_window_size)

@@ -14,7 +14,7 @@ def build_merge_stage(
     config: PVConfig,
 ) -> Tuple[Stage, List[str]]:
     paths = config.paths
-    top = config.top
+    files = config.files
     merge_tasks: List[Task] = []
     laker_outputs: List[str] = []
 
@@ -24,12 +24,10 @@ def build_merge_stage(
 
         script = flag_cfg.script
         tag = flag_cfg.tag
-        if tag == "DMEXCL":
-            outputs = [f"{paths.gds_dir}/{tag}.gds.gz"]
-        else:
-            outputs = [f"{paths.gds_dir}/{tag}.gds"]
-
-        laker_outputs.append(f"{paths.laker_dir}/{top}_{tag}.blitz++")
+        tag_gds_tmpl = files.merge_tag_gds_gz if tag == "DMEXCL" else files.merge_tag_gds
+        outputs = [config.io(tag_gds_tmpl, tag=tag)]
+        blitz = config.io(files.merge_blitz, tag=tag)
+        laker_outputs.append(blitz)
         merge_tasks.append(
             make_task(
                 tag,
@@ -37,7 +35,7 @@ def build_merge_stage(
                     make_job(
                         f"Calibre_{script}",
                         f"{paths.flow_dir}/{script}.sh",
-                        [f"{paths.gds_dir}/{top}_FULL.gds.gz"],
+                        [config.io(files.full_gds)],
                         outputs,
                         config.queue,
                         config.cpu,
@@ -46,7 +44,7 @@ def build_merge_stage(
                         f"laker_{script}",
                         f"{paths.flow_dir}/bzgdsin_{script}.sh",
                         outputs,
-                        [f"{paths.laker_dir}/{top}_{tag}.blitz++"],
+                        [blitz],
                         config.queue,
                         config.cpu,
                     ),
@@ -54,6 +52,7 @@ def build_merge_stage(
             )
         )
 
+    create_text = config.io(files.create_text_tcl)
     merge_tasks.append(
         make_task(
             "laker_text",
@@ -62,17 +61,17 @@ def build_merge_stage(
                     "laker_text",
                     f"{paths.flow_dir}/{config.scripts.laker_text}",
                     [
-                        f"{paths.laker_dir}/{top}_APR.blitz++",
-                        f"{paths.gds_dir}/{top}_FULL.gds.gz",
+                        config.io(files.apr_blitz),
+                        config.io(files.full_gds),
                     ],
-                    [f"{paths.laker_dir}/{config.files.create_text_tcl}"],
+                    [create_text],
                     config.queue,
                     config.cpu,
                 )
             ],
         )
     )
-    laker_outputs.append(f"{paths.laker_dir}/{config.files.create_text_tcl}")
-    laker_outputs.append(f"{paths.data_dir}/{config.files.laker_top_lib_tcl}")
+    laker_outputs.append(create_text)
+    laker_outputs.append(config.io(files.laker_top_lib_tcl))
 
     return make_stage("Merge", merge_tasks), laker_outputs

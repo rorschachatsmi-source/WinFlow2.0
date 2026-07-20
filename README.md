@@ -218,7 +218,7 @@ cfg = get_config(reload=True)
 | `paths.flow_dir`    | Shell script directory (default `../flow`; override via `FLOW_DIR`)              |
 | `paths.data_dir`    | Input data directory (default `../DATA`; override via `DATA_DIR`)                |
 | `scripts.*`         | Shell script filenames used by PV stage builders                                 |
-| `files.*`           | File patterns (`apr.gds.gz`, `DRC.rep`, etc.)                                    |
+| `files.*`           | Full job I/O path templates (e.g. `spi_inputs`, `{data_dir}/apr.gds.gz`)         |
 | `merge_flags`       | Maps `setting.sh` flags to merge scripts and GDS tags                            |
 
 

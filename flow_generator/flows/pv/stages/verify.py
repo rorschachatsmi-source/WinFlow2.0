@@ -10,7 +10,7 @@ from flow_generator.flows.pv.stages.spi_rcxt_lvs import lvs_task
 
 
 def _oas_input(config: PVConfig) -> str:
-    return f"{config.paths.gds_dir}/{config.final_top}.oas"
+    return config.io(config.files.final_oas)
 
 
 def _use_drc_stage_name(settings: Dict[str, str]) -> bool:
@@ -29,7 +29,7 @@ def _generic_drc_task(config: PVConfig) -> Task:
                 "DRC",
                 f"{paths.flow_dir}/{config.scripts.run_drc} DRC",
                 [_oas_input(config)],
-                [config.files.drc_report],
+                [config.io(config.files.drc_report)],
                 config.queue,
                 config.cpu,
             )
@@ -46,7 +46,7 @@ def _drc_be_task(config: PVConfig) -> Task:
                 "DRC_BE",
                 f"{paths.flow_dir}/{config.scripts.run_drc} DRC_BE",
                 [_oas_input(config)],
-                [config.files.drc_report],
+                [config.io(config.files.drc_report)],
                 config.queue,
                 config.cpu,
             )
@@ -63,7 +63,7 @@ def _drc_fe_task(config: PVConfig) -> Task:
                 "DRC_FE",
                 f"{paths.flow_dir}/{config.scripts.run_drc} DRC_FE",
                 [_oas_input(config)],
-                [config.files.drc_report],
+                [config.io(config.files.drc_report)],
                 config.queue,
                 config.cpu,
             )

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, TYPE_CHECKING
+from typing import Dict, List, Sequence, TYPE_CHECKING
 
 from flow_generator.core.context import BuildContext
+from flow_generator.flows.pv.io import format_pv_io, format_pv_io_list
 from flow_generator.flows.pv.paths import PVPaths
 from winflow_config import get_config
 
@@ -39,6 +40,26 @@ class PVConfig:
             paths=PVPaths.from_settings(settings),
             scripts=pv_cfg.scripts,
             files=pv_cfg.files,
+        )
+
+    def io(self, template: str, **extra: str) -> str:
+        """Expand one ``pv.files`` path template."""
+        return format_pv_io(
+            template,
+            paths=self.paths,
+            top=self.top,
+            final_top=self.final_top,
+            **extra,
+        )
+
+    def io_list(self, templates: Sequence[str], **extra: str) -> List[str]:
+        """Expand a list of ``pv.files`` path templates."""
+        return format_pv_io_list(
+            templates,
+            paths=self.paths,
+            top=self.top,
+            final_top=self.final_top,
+            **extra,
         )
 
 

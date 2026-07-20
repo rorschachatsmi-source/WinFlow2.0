@@ -13,7 +13,7 @@ import time
 import getpass
 import subprocess
 import logging
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Callable
 from dataclasses import dataclass
 from enum import Enum
@@ -313,34 +313,35 @@ class FlowRunner:
         self.logger.debug(f"  Inputs: {job_inputs}")
         self.logger.debug(f"  Outputs: {job_outputs}")
 
-        # Validate inputs
-        self.validator.validate_paths(job_inputs, "input")
-
-        # Submit job
-        runner_cfg = self.job_manager.config.runner
-        queue = job.get("queue") or runner_cfg.default_queue
-        cpu = job.get("cpu", runner_cfg.default_cpu)
-        job_id = self.job_manager.submit_job(
-            job_name,
-            job["command"],
-            queue=queue,
-            cpu=cpu,
-            machine=job.get("machine", ""),
-        )
-
-        self._notify_job(
-            "job_submitted",
-            job_key=job_key,
-            template_name=template_name,
-            lsf_name=job_name,
-            job_id=job_id,
-            stage=stage_name,
-            task=task_name,
-            status=JobStatus.PENDING.value,
-        )
-
-        # Wait for completion
+        job_id = ""
         try:
+            # Validate inputs
+            self.validator.validate_paths(job_inputs, "input")
+
+            # Submit job
+            runner_cfg = self.job_manager.config.runner
+            queue = job.get("queue") or runner_cfg.default_queue
+            cpu = job.get("cpu", runner_cfg.default_cpu)
+            job_id = self.job_manager.submit_job(
+                job_name,
+                job["command"],
+                queue=queue,
+                cpu=cpu,
+                machine=job.get("machine", ""),
+            )
+
+            self._notify_job(
+                "job_submitted",
+                job_key=job_key,
+                template_name=template_name,
+                lsf_name=job_name,
+                job_id=job_id,
+                stage=stage_name,
+                task=task_name,
+                status=JobStatus.PENDING.value,
+            )
+
+            # Wait for completion
             self.job_manager.wait_job(
                 job_id,
                 job_outputs,
@@ -356,6 +357,7 @@ class FlowRunner:
                 ),
             )
         except Exception:
+            # Cover missing inputs / submit failures too (not only wait_job).
             self._notify_job(
                 "job_failed",
                 job_key=job_key,
@@ -406,7 +408,14 @@ class FlowRunner:
         stage_name = stage["name"]
         self.logger.info(f"[STAGE START] {stage_name}")
 
-        with ThreadPoolExecutor(max_workers=len(stage["tasks"])) as pool:
+        tasks = stage.get("tasks") or []
+        if not tasks:
+            self.logger.info(f"[STAGE END] {stage_name} (no tasks)")
+            return
+
+        # Submit every task immediately; surface the first failure via as_completed
+        # so a sibling that dies on missing inputs is not hidden until others finish.
+        with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
             futures = [
                 pool.submit(
                     self.run_task,
@@ -416,10 +425,9 @@ class FlowRunner:
                     poll_interval,
                     job_filter,
                 )
-                for task in stage["tasks"]
+                for task in tasks
             ]
-
-            for future in futures:
+            for future in as_completed(futures):
                 future.result()
 
         self.logger.info(f"[STAGE END] {stage_name}")

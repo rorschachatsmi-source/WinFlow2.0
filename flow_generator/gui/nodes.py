@@ -8,6 +8,8 @@ from typing import List, Optional, Tuple
 
 from flow_generator.core.io import write_flow
 from flow_generator.core.models import Job, make_flow, make_job, make_stage, make_task
+from flow_generator.flows.pv.io import format_pv_io, format_pv_io_list
+from flow_generator.flows.pv.paths import PVPaths
 from winflow_config import get_config
 
 # Default library location: flow_generator/node/
@@ -129,10 +131,6 @@ def write_node(
     return path
 
 
-def _pv_paths():
-    return get_config().pv.paths
-
-
 def _pv_scripts():
     return get_config().pv.scripts
 
@@ -152,7 +150,7 @@ def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
     pv_flow = get_config().pv.flow_name
     apr_flow = apr.flow_name
     blank_flow = gen.blank_flow_name
-    paths = _pv_paths()
+    paths = PVPaths.defaults()
     scripts = _pv_scripts()
     files = _pv_files()
     queue = gen.default_queue
@@ -160,6 +158,12 @@ def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
     top = PLACEHOLDER_TOP
     block = PLACEHOLDER_BLOCK
     workdir = PLACEHOLDER_WORKDIR
+
+    def io(template: str, **extra: str) -> str:
+        return format_pv_io(template, paths=paths, top=top, final_top=top, **extra)
+
+    def io_list(templates, **extra: str) -> List[str]:
+        return format_pv_io_list(templates, paths=paths, top=top, final_top=top, **extra)
 
     nodes: List[Tuple[str, str, Job]] = []
 
@@ -194,8 +198,8 @@ def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
         make_job(
             f"{block}_calibre",
             f"{paths.flow_dir}/{scripts.sub_calibre_dm} {block} {workdir}",
-            [f"{paths.laker_dir}/{files.sub_dmexcl_calibre}"],
-            [f"{paths.laker_dir}/{block}_dummy.gds.gz"],
+            [io(files.sub_dmexcl_calibre, block=block, workdir=workdir)],
+            [io(files.sub_dummy_gds, block=block, workdir=workdir)],
             queue,
             cpu,
         ),
@@ -206,8 +210,8 @@ def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
         make_job(
             f"{block}_laker",
             f"{paths.flow_dir}/{scripts.sub_bzgdsin_apr} {block} {workdir}",
-            [f"{workdir}/GDS/{block}.gds.gz"],
-            [f"{paths.laker_dir}/{block}.blitz++"],
+            [io(files.sub_block_gds, block=block, workdir=workdir)],
+            [io(files.sub_block_blitz, block=block, workdir=workdir)],
             queue,
             cpu,
         ),
@@ -218,8 +222,8 @@ def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
         make_job(
             "laker_In",
             f"{paths.flow_dir}/{scripts.bzgdsin_apr}",
-            [f"{paths.data_dir}/{files.apr_gds}"],
-            [f"{paths.laker_dir}/{top}_APR.blitz++"],
+            [io(files.apr_gds)],
+            [io(files.apr_blitz)],
             queue,
             cpu,
         ),
@@ -230,8 +234,8 @@ def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
         make_job(
             "laker_pre_In",
             f"{paths.flow_dir}/{scripts.pre_bzgdsin_apr}",
-            [f"{paths.data_dir}/{files.apr_gds}"],
-            [f"{paths.laker_dir}/{top}_APR.blitz++"],
+            [io(files.apr_gds)],
+            [io(files.apr_blitz)],
             queue,
             cpu,
         ),
@@ -242,8 +246,8 @@ def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
         make_job(
             "laker_Out",
             f"{paths.flow_dir}/{scripts.bzgdsout_apr}",
-            [f"{paths.laker_dir}/{top}_APR.blitz++"],
-            [f"{paths.gds_dir}/{top}_FULL.gds.gz"],
+            [io(files.apr_blitz)],
+            [io(files.full_gds)],
             queue,
             cpu,
         ),
@@ -254,11 +258,8 @@ def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
         make_job(
             "SPI",
             f"{paths.flow_dir}/{scripts.spi}",
-            [
-                files.spi_input_spi.format(top=top),
-                f"{paths.data_dir}/{files.spi_input_netlist}",
-            ],
-            [f"{paths.spi_dir}/{files.spi_output.format(top=top)}"],
+            io_list(files.spi_inputs),
+            io_list(files.spi_outputs),
             queue,
             cpu,
         ),
@@ -269,8 +270,8 @@ def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
         make_job(
             "RCXT",
             f"{paths.flow_dir}/{scripts.rcxt}",
-            [f"{paths.gds_dir}/DM.gds"],
-            [files.rcxt_output],
+            io_list(files.rcxt_inputs),
+            io_list(files.rcxt_outputs),
             queue,
             cpu,
         ),
@@ -281,14 +282,8 @@ def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
         make_job(
             "LVS",
             f"{paths.flow_dir}/{scripts.lvs}",
-            [
-                files.lvs_hcell,
-                files.lvs_calibre,
-                files.lvs_layout_spi,
-                f"{paths.gds_dir}/{top}.oas",
-                f"{paths.spi_dir}/{files.spi_output.format(top=top)}",
-            ],
-            [files.lvs_report],
+            io_list(files.lvs_inputs),
+            io_list(files.lvs_outputs),
             queue,
             cpu,
         ),
@@ -297,17 +292,15 @@ def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
     for flag_cfg in get_config().pv.merge_flags:
         script = flag_cfg.script
         tag = flag_cfg.tag
-        if tag == "DMEXCL":
-            gds_outs = [f"{paths.gds_dir}/{tag}.gds.gz"]
-        else:
-            gds_outs = [f"{paths.gds_dir}/{tag}.gds"]
+        tag_gds_tmpl = files.merge_tag_gds_gz if tag == "DMEXCL" else files.merge_tag_gds
+        gds_outs = [io(tag_gds_tmpl, tag=tag)]
         add(
             f"Calibre_{script}",
             pv_flow,
             make_job(
                 f"Calibre_{script}",
                 f"{paths.flow_dir}/{script}.sh",
-                [f"{paths.gds_dir}/{top}_FULL.gds.gz"],
+                [io(files.full_gds)],
                 gds_outs,
                 queue,
                 cpu,
@@ -320,7 +313,7 @@ def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
                 f"laker_{script}",
                 f"{paths.flow_dir}/bzgdsin_{script}.sh",
                 gds_outs,
-                [f"{paths.laker_dir}/{top}_{tag}.blitz++"],
+                [io(files.merge_blitz, tag=tag)],
                 queue,
                 cpu,
             ),
@@ -333,10 +326,10 @@ def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
             "laker_text",
             f"{paths.flow_dir}/{scripts.laker_text}",
             [
-                f"{paths.laker_dir}/{top}_APR.blitz++",
-                f"{paths.gds_dir}/{top}_FULL.gds.gz",
+                io(files.apr_blitz),
+                io(files.full_gds),
             ],
-            [f"{paths.laker_dir}/{files.create_text_tcl}"],
+            [io(files.create_text_tcl)],
             queue,
             cpu,
         ),
@@ -348,11 +341,11 @@ def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
             "laker_topLib",
             f"{paths.flow_dir}/{scripts.laker_topLib}",
             [
-                f"{paths.laker_dir}/{top}_DM.blitz++",
-                f"{paths.laker_dir}/{files.create_text_tcl}",
-                f"{paths.data_dir}/{files.laker_top_lib_tcl}",
+                io(files.merge_blitz, tag="DM"),
+                io(files.create_text_tcl),
+                io(files.laker_top_lib_tcl),
             ],
-            [f"{paths.laker_dir}/{top}_LIB.blitz++"],
+            [io(files.lib_blitz)],
             queue,
             cpu,
         ),
@@ -364,10 +357,10 @@ def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
             f"{top}_Out",
             f"{paths.flow_dir}/{scripts.bzgdsout_top}",
             [
-                f"{paths.laker_dir}/{top}_LIB.blitz++",
-                f"{paths.gds_dir}/{top}_FULL.gds.gz",
+                io(files.lib_blitz),
+                io(files.full_gds),
             ],
-            [f"{paths.gds_dir}/{top}.gds.gz"],
+            [io(files.final_gds)],
             queue,
             cpu,
         ),
@@ -378,8 +371,8 @@ def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
         make_job(
             "gds2oas",
             f"{paths.flow_dir}/{scripts.gds2oas}",
-            [f"{paths.gds_dir}/{top}.gds.gz"],
-            [f"{paths.gds_dir}/{top}.oas"],
+            [io(files.final_gds)],
+            [io(files.final_oas)],
             queue,
             cpu,
         ),
@@ -392,8 +385,8 @@ def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
             make_job(
                 drc_name,
                 f"{paths.flow_dir}/{scripts.run_drc} {drc_name}",
-                [f"{paths.gds_dir}/{top}.oas"],
-                [files.drc_report],
+                [io(files.final_oas)],
+                [io(files.drc_report)],
                 queue,
                 cpu,
             ),

@@ -63,6 +63,37 @@ class TestFlowGraph(unittest.TestCase):
             self.assertEqual(gs.replace("\0", "/"), _rs)
             self.assertEqual(gd.replace("\0", "/"), _rd)
 
+    def test_file_edge_survives_when_parent_stage_is_listed_later(self):
+        """Parent in a later stage list slot must still link (two-pass build)."""
+        stages = [
+            {
+                "name": "child_stage",
+                "tasks": [
+                    {
+                        "name": "t",
+                        "jobs": [
+                            {"name": "child", "inputs": ["out.dat"], "outputs": []},
+                        ],
+                    }
+                ],
+            },
+            {
+                "name": "parent_stage",
+                "tasks": [
+                    {
+                        "name": "t",
+                        "jobs": [
+                            {"name": "parent", "inputs": [], "outputs": ["out.dat"]},
+                        ],
+                    }
+                ],
+            },
+        ]
+        edges = build_flow_graph_edges(stages)
+        parent = default_job_key("parent_stage", "t", "parent")
+        child = default_job_key("child_stage", "t", "child")
+        self.assertIn((parent, child, "out.dat"), edges)
+
 
 if __name__ == "__main__":
     unittest.main()

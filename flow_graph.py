@@ -42,12 +42,17 @@ def build_flow_graph_edges(
     Build job edges the same way as flow_runner_gui.FlowGraphModel.
 
     Returns list of (parent_key, child_key, label).
+
+    File dependencies are resolved in a second pass so a parent job that appears
+    later in stage order (e.g. after a stage rename) still links correctly.
     """
     edges: List[JobEdge] = []
     edge_pairs: Set[Tuple[JobKey, JobKey]] = set()
     output_producers: Dict[str, JobKey] = {}
     prev_in_task: Dict[Tuple[str, str], JobKey] = {}
+    jobs: List[Tuple[JobKey, dict]] = []
 
+    # Pass 1: task-order edges + register every output producer.
     for stage in stages:
         stage_name = stage["name"]
         for task in stage.get("tasks", []):
@@ -57,19 +62,22 @@ def build_flow_graph_edges(
             for job in task.get("jobs", []):
                 job_name = job["name"]
                 key = key_fn(stage_name, task_name, job_name)
+                jobs.append((key, job))
 
                 prev_key = prev_in_task.get(task_id)
                 if prev_key:
                     _add_edge(edges, edge_pairs, prev_key, key, EDGE_TASK_ORDER)
                 prev_in_task[task_id] = key
 
-                for inp in job.get("inputs", []):
-                    producer = output_producers.get(inp)
-                    if producer and producer != key:
-                        _add_edge(edges, edge_pairs, producer, key, inp)
-
                 for out in job.get("outputs", []):
                     output_producers[out] = key
+
+    # Pass 2: file-dependency edges (order-independent).
+    for key, job in jobs:
+        for inp in job.get("inputs", []):
+            producer = output_producers.get(inp)
+            if producer and producer != key:
+                _add_edge(edges, edge_pairs, producer, key, inp)
 
     return edges
 

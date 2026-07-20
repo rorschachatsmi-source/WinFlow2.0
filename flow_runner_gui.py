@@ -8,6 +8,7 @@ and per-job log tailing from log/*.
 
 import json
 import os
+import queue
 import subprocess
 import sys
 import tkinter as tk
@@ -17,7 +18,7 @@ from pathlib import Path
 import threading
 from datetime import datetime
 from collections import defaultdict, deque
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Callable, Any
 
 from flow_graph import build_flow_graph_edges, compute_layers
 from flow_generator.core.io import write_flow
@@ -26,9 +27,45 @@ from winflow_config import get_config
 
 # Segoe UI / Consolas are Windows fonts; missing glyphs on Linux X11 often trigger
 # RENDER RenderAddGlyphs BadLength errors. Use common Linux fonts as fallback.
+# Also avoid emoji / astral Unicode in labels — color-emoji font fallback crashes Tk.
 UI_FONT = "Segoe UI" if sys.platform == "win32" else "DejaVu Sans"
 MONO_FONT = "Consolas" if sys.platform == "win32" else "DejaVu Sans Mono"
 APP_BRAND = "WinFlow"
+
+
+def configure_safe_tk_fonts(root: tk.Misc) -> None:
+    """Pin Tk named fonts so fontconfig does not fall back to Noto Color Emoji."""
+    global UI_FONT, MONO_FONT
+    available = {name.lower(): name for name in tkfont.families(root)}
+
+    def _pick(candidates: Tuple[str, ...]) -> str:
+        for name in candidates:
+            hit = available.get(name.lower())
+            if hit:
+                return hit
+        return candidates[0]
+
+    if sys.platform == "win32":
+        UI_FONT = _pick(("Segoe UI", "Arial", "Tahoma"))
+        MONO_FONT = _pick(("Consolas", "Cascadia Mono", "Courier New"))
+    else:
+        UI_FONT = _pick(("DejaVu Sans", "Liberation Sans", "FreeSans", "Helvetica"))
+        MONO_FONT = _pick(("DejaVu Sans Mono", "Liberation Mono", "FreeMono", "Courier"))
+
+    for font_name, family, size in (
+        ("TkDefaultFont", UI_FONT, 9),
+        ("TkTextFont", UI_FONT, 9),
+        ("TkMenuFont", UI_FONT, 9),
+        ("TkHeadingFont", UI_FONT, 10),
+        ("TkCaptionFont", UI_FONT, 9),
+        ("TkSmallCaptionFont", UI_FONT, 8),
+        ("TkTooltipFont", UI_FONT, 8),
+        ("TkFixedFont", MONO_FONT, 9),
+    ):
+        try:
+            tkfont.nametofont(font_name).configure(family=family, size=size)
+        except tk.TclError:
+            pass
 
 # ── Visual theme ──────────────────────────────────────────────────────────────
 
@@ -71,7 +108,7 @@ LIGHT_NODE_STATUSES = {"PEND", "pend"}
 def _truncate_to_width(text: str, font: tkfont.Font, max_width: int) -> str:
     if font.measure(text) <= max_width:
         return text
-    ell = "…"
+    ell = "..."
     trimmed = text
     while trimmed and font.measure(trimmed + ell) > max_width:
         trimmed = trimmed[:-1]
@@ -352,19 +389,15 @@ class JobKillMonitor:
     def _set_node_status(self, job_key: str, status: str):
         if not self.gui.graph_model:
             return
-        node = self.gui.graph_model.get_node(job_key)
-        if node:
-            node["status"] = status
-        self.gui.graph_canvas.redraw()
+        self.gui.graph_canvas.update_job(job_key, status)
 
     def _mark_killed(self, job_key: str, label: str, reason: str):
         node = self.gui.graph_model.get_node(job_key) if self.gui.graph_model else None
         if node and node.get("status") == "KILLING":
-            node["status"] = "EXIT"
             if not node.get("end_time"):
                 node["end_time"] = datetime.now()
+            self.gui.graph_canvas.update_job(job_key, "EXIT")
         self.gui._log_callback(f"{reason}: {label}", "INFO")
-        self.gui.graph_canvas.redraw()
 
     def _finish_target(self, target_id: str, info: Dict, reason: str):
         label = info["lsf_name"] or info["job_id"]
@@ -453,7 +486,8 @@ class FlowGraphCanvas(tk.Canvas):
         self.model: Optional[FlowGraphModel] = None
         self.on_node_click = on_node_click
         self.positions: Dict[str, Tuple[int, int]] = {}
-        self.active_key: Optional[str] = None
+        # All jobs currently PEND/RUN (parallel tasks can flash together).
+        self.active_keys: Set[str] = set()
         self._pulse_on = False
         self._pulse_id: Optional[str] = None
         self._tooltip = CanvasTooltip(self)
@@ -465,7 +499,7 @@ class FlowGraphCanvas(tk.Canvas):
 
     def set_model(self, model: FlowGraphModel):
         self.model = model
-        self.active_key = None
+        self.active_keys.clear()
         self.redraw()
 
     def load_config(self, config: Dict):
@@ -483,14 +517,12 @@ class FlowGraphCanvas(tk.Canvas):
         if job_id:
             node["job_id"] = job_id
         if status in ("PEND", "RUN", "running", "pending", "job_start"):
-            if self.active_key != job_key:
-                if self._pulse_id:
-                    self.after_cancel(self._pulse_id)
-                    self._pulse_id = None
-                self.active_key = job_key
-        elif status in ("DONE", "done", "EXIT", "failed", "KILLING", "killing"):
-            if self.active_key == job_key and status not in ("KILLING", "killing"):
-                self.active_key = None
+            self.active_keys.add(job_key)
+        elif status in ("DONE", "done", "EXIT", "failed"):
+            self.active_keys.discard(job_key)
+        elif status in ("KILLING", "killing"):
+            # Keep pulsing while kill is in progress.
+            self.active_keys.add(job_key)
         self.redraw()
 
     def reset(self):
@@ -503,7 +535,7 @@ class FlowGraphCanvas(tk.Canvas):
                     start_time=None,
                     end_time=None,
                 )
-        self.active_key = None
+        self.active_keys.clear()
         self.redraw()
 
     def _bind_node_click(self, job_key: str):
@@ -540,9 +572,9 @@ class FlowGraphCanvas(tk.Canvas):
         self._draw_nodes()
         self._draw_stage_labels()
 
-        if self.active_key and not self._pulse_id:
+        if self.active_keys and not self._pulse_id:
             self._start_pulse()
-        elif not self.active_key and self._pulse_id:
+        elif not self.active_keys and self._pulse_id:
             self.after_cancel(self._pulse_id)
             self._pulse_id = None
 
@@ -553,27 +585,27 @@ class FlowGraphCanvas(tk.Canvas):
 
     def _pulse_tick(self):
         self._pulse_id = None
-        if self.active_key:
+        if self.active_keys:
             self._start_pulse()
 
     def _draw_pulse_only(self):
-        if not self.active_key or not self.model:
+        if not self.active_keys or not self.model:
             return
         self.delete("pulse")
-        key = self.active_key
-        if key not in self.positions:
-            return
-        x, y = self.positions[key]
-        x0 = x - self.NODE_W // 2 - 3
-        y0 = y - self.NODE_H // 2 - 3
-        x1 = x + self.NODE_W // 2 + 3
-        y1 = y + self.NODE_H // 2 + 3
-        self.create_rectangle(
-            x0, y0, x1, y1,
-            fill=COLORS["active_ring"] if self._pulse_on else COLORS["panel"],
-            outline="", tags="pulse"
-        )
-        self.tag_raise(key)
+        for key in list(self.active_keys):
+            if key not in self.positions:
+                continue
+            x, y = self.positions[key]
+            x0 = x - self.NODE_W // 2 - 3
+            y0 = y - self.NODE_H // 2 - 3
+            x1 = x + self.NODE_W // 2 + 3
+            y1 = y + self.NODE_H // 2 + 3
+            self.create_rectangle(
+                x0, y0, x1, y1,
+                fill=COLORS["active_ring"] if self._pulse_on else COLORS["panel"],
+                outline="", tags="pulse"
+            )
+            self.tag_raise(key)
 
     def _draw_placeholder(self, text: str):
         w = self.winfo_width() or 400
@@ -609,7 +641,7 @@ class FlowGraphCanvas(tk.Canvas):
             x2, y2 = self.positions[dst]
             sx = x1 + self.NODE_W // 2
             tx = x2 - self.NODE_W // 2
-            self.create_line(sx, y1, tx, y2, fill=COLORS["edge"], width=2, arrow=tk.LAST, smooth=True)
+            self.create_line(sx, y1, tx, y2, fill=COLORS["edge"], width=2, arrow=tk.LAST)
 
     def _draw_nodes(self):
         assert self.model
@@ -621,7 +653,7 @@ class FlowGraphCanvas(tk.Canvas):
             x0, y0 = x - self.NODE_W // 2, y - self.NODE_H // 2
             x1, y1 = x + self.NODE_W // 2, y + self.NODE_H // 2
             color = STATUS_COLORS.get(node["status"], COLORS["pending"])
-            is_active = key == self.active_key
+            is_active = key in self.active_keys
             if node["status"] in LIGHT_NODE_STATUSES:
                 title_fill, status_fill = COLORS["text"], COLORS["muted"]
             else:
@@ -966,11 +998,42 @@ class FlowRunnerGUI:
         self.kill_monitor = JobKillMonitor(self)
         self.sync_btn: Optional[tk.Button] = None
         self._suppress_auto_load = False
+        # Tk is not thread-safe: never call root.after / widgets from worker threads.
+        self._ui_queue: queue.Queue = queue.Queue()
 
+        configure_safe_tk_fonts(self.window)
         self._setup_styles()
         self._setup_ui()
         self._bind_config_events()
+        self.root.after(50, self._poll_ui_queue)
         self.root.after(0, self._auto_load_graph)
+
+    def _call_ui(self, fn: Callable[..., Any], *args, **kwargs) -> None:
+        """Marshal a callable onto the Tk main thread (safe from any thread)."""
+        self._ui_queue.put((fn, args, kwargs))
+
+    def _poll_ui_queue(self) -> None:
+        try:
+            while True:
+                fn, args, kwargs = self._ui_queue.get_nowait()
+                try:
+                    fn(*args, **kwargs)
+                except tk.TclError:
+                    pass
+                except Exception as exc:
+                    try:
+                        self.flow_log_messages.append(
+                            ("ERROR", f"UI callback error: {exc}", datetime.now().strftime("%H:%M:%S"))
+                        )
+                        self._update_log_display()
+                    except Exception:
+                        pass
+        except queue.Empty:
+            pass
+        try:
+            self.root.after(50, self._poll_ui_queue)
+        except tk.TclError:
+            pass
 
     def _setup_styles(self):
         style = ttk.Style()
@@ -1027,7 +1090,7 @@ class FlowRunnerGUI:
         if self.sync_source is not None:
             self.sync_btn = tk.Button(
                 inner_top,
-                text="↻ Sync from Generator",
+                text="Sync from Generator",
                 command=self._sync_from_generator,
                 font=(UI_FONT, 9, "bold"),
                 relief=tk.FLAT,
@@ -1056,28 +1119,28 @@ class FlowRunnerGUI:
                  bg=COLORS["panel"], fg=COLORS["text"]).pack(pady=(14, 8))
 
         self.run_btn = tk.Button(
-            rail, text="▶  Run Flow", command=self._run_flow,
+            rail, text="Run Flow", command=self._run_flow,
             bg=COLORS["done"], fg="white", width=14, height=2,
             font=(UI_FONT, 9, "bold"), relief=tk.FLAT, cursor="hand2"
         )
         self.run_btn.pack(pady=6, padx=10)
 
         self.rerun_btn = tk.Button(
-            rail, text="↻  Rerun", command=self._rerun_from_failure,
+            rail, text="Rerun", command=self._rerun_from_failure,
             bg="#bf8700", fg="white", width=14, height=2,
             state=tk.DISABLED, font=(UI_FONT, 9, "bold"), relief=tk.FLAT
         )
         self.rerun_btn.pack(pady=6, padx=10)
 
         self.stop_btn = tk.Button(
-            rail, text="⏹  Stop", command=self._stop_flow,
+            rail, text="Stop", command=self._stop_flow,
             bg=COLORS["failed"], fg="white", width=14, height=2,
             state=tk.DISABLED, font=(UI_FONT, 9, "bold"), relief=tk.FLAT
         )
         self.stop_btn.pack(pady=6, padx=10)
 
         tk.Button(
-            rail, text="🗑  Clear Logs", command=self._clear_logs,
+            rail, text="Clear Logs", command=self._clear_logs,
             bg=COLORS["accent"], fg="white", width=14, height=2,
             font=(UI_FONT, 9, "bold"), relief=tk.FLAT
         ).pack(pady=6, padx=10)
@@ -1120,7 +1183,7 @@ class FlowRunnerGUI:
 
         # Graph panel
         graph_frame = tk.LabelFrame(
-            self.main_paned, text=" Job Flow (left → right) ", font=(UI_FONT, 9, "bold"),
+            self.main_paned, text=" Job Flow (left -> right) ", font=(UI_FONT, 9, "bold"),
             bg=COLORS["panel"], fg=COLORS["text"], padx=4, pady=4
         )
         self.main_paned.add(graph_frame, weight=1)
@@ -1209,9 +1272,9 @@ class FlowRunnerGUI:
         if not Path(config_path).exists():
             return None
         try:
-            with open(config_path, "r") as fp:
+            with open(config_path, "r", encoding="utf-8") as fp:
                 config = json.load(fp)
-        except json.JSONDecodeError as e:
+        except (OSError, json.JSONDecodeError):
             return None
         return config
 
@@ -1321,6 +1384,7 @@ class FlowRunnerGUI:
 
         out = self.sync_source.get_output_path()
         try:
+            out = Path(out)
             write_flow(flow, out)
         except OSError as exc:
             messagebox.showerror(
@@ -1330,16 +1394,28 @@ class FlowRunnerGUI:
             )
             return
 
+        # Reload from disk so Run always executes exactly what was written.
+        try:
+            with out.open("r", encoding="utf-8") as fp:
+                written = json.load(fp)
+        except (OSError, json.JSONDecodeError) as exc:
+            messagebox.showerror(
+                "Sync failed",
+                f"Wrote {out} but could not re-read it:\n{exc}",
+                parent=parent,
+            )
+            return
+
         # Point runner at the written file without the auto-load path that
         # preserves prior job statuses.
         self._suppress_auto_load = True
         try:
-            self.config_path_var.set(str(out))
+            self.config_path_var.set(str(out.resolve()))
         finally:
             self._suppress_auto_load = False
 
-        self.flow_config = flow
-        self.graph_model = FlowGraphModel(flow)
+        self.flow_config = written
+        self.graph_model = FlowGraphModel(written)
         self.graph_canvas.set_model(self.graph_model)
         self.graph_canvas.reset()
         self.completed_jobs = 0
@@ -1347,9 +1423,10 @@ class FlowRunnerGUI:
         self._refresh_job_selector()
         self._update_action_buttons()
         self._update_status("Synced", COLORS["accent"])
+        stage_names = [s.get("name", "?") for s in written.get("stages", [])]
         self._log_callback(
-            f"Synced flow from Generator → {out} "
-            f"({self.total_jobs} job(s); all statuses reset to pending)",
+            f"Synced flow from Generator -> {out.resolve()} "
+            f"({self.total_jobs} job(s); stages: {' -> '.join(stage_names)})",
             "INFO",
         )
 
@@ -1388,16 +1465,22 @@ class FlowRunnerGUI:
 
     def _log_callback(self, message: str, level: str):
         ts = datetime.now().strftime("%H:%M:%S")
+        self._call_ui(self._append_flow_log, level, message, ts)
+
+    def _append_flow_log(self, level: str, message: str, ts: str):
         self.flow_log_messages.append((level, message, ts))
-        self.root.after(0, self._update_log_display)
+        self._update_log_display()
 
     def _on_job_log_chunk(self, kind: str, filename: str, chunk: str):
-        level = "STDERR" if kind == "stderr" else "STDOUT"
         ts = datetime.now().strftime("%H:%M:%S")
+        self._call_ui(self._append_job_log_chunk, kind, filename, chunk, ts)
+
+    def _append_job_log_chunk(self, kind: str, filename: str, chunk: str, ts: str):
+        level = "STDERR" if kind == "stderr" else "STDOUT"
         for line in chunk.splitlines(keepends=True):
             if line.strip():
                 self.job_log_messages.append((level, f"[{filename}] {line.rstrip()}", ts))
-        self.root.after(0, self._update_log_display)
+        self._update_log_display()
 
     def _should_show(self, level: str) -> bool:
         if level in ("STDOUT", "STDERR"):
@@ -1503,7 +1586,8 @@ class FlowRunnerGUI:
     # ── Job events ────────────────────────────────────────────────────────────
 
     def _job_callback(self, event: str, data: Dict):
-        self.root.after(0, lambda: self._handle_job_event(event, data))
+        # Called from the flow worker thread — do not touch Tk here.
+        self._call_ui(self._handle_job_event, event, dict(data))
 
     def _handle_job_event(self, event: str, data: Dict):
         job_key = data.get("job_key", "")
@@ -1592,7 +1676,7 @@ class FlowRunnerGUI:
         self.rerun_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
         self._update_action_buttons()
-        self._update_status("Running…", COLORS["running"])
+        self._update_status("Running...", COLORS["running"])
 
         thread = threading.Thread(
             target=self._run_flow_thread,
@@ -1664,20 +1748,39 @@ class FlowRunnerGUI:
                 log_callback=self._log_callback,
                 job_callback=self._job_callback,
             )
-            self._log_callback(f"Flow log → {log_file}", "INFO")
+            self._log_callback(f"Flow log -> {log_file}", "INFO")
             self._log_callback("Starting flow execution", "INFO")
             self.runner.run_flow(config, job_filter=job_filter)
-            self.root.after(0, lambda: self._update_status("Completed ✓", COLORS["done"]))
-            self.root.after(0, lambda: messagebox.showinfo("Success", "Flow completed successfully!"))
-        except Exception as e:
-            self._log_callback(f"Error: {str(e)}", "ERROR")
-            self.root.after(0, lambda: self._update_status("Failed", COLORS["failed"]))
-            self.root.after(0, lambda: messagebox.showerror("Error", f"Flow execution failed:\n{e}"))
+            self._call_ui(self._on_flow_finished_ok)
+        except Exception as exc:
+            # Capture message now — exception vars are cleared when except ends,
+            # so deferred UI callbacks must not close over `exc`.
+            err_msg = str(exc)
+            self._log_callback(f"Error: {err_msg}", "ERROR")
+            self._call_ui(self._on_flow_finished_error, err_msg)
         finally:
             self.is_running = False
             self.job_tailer.stop()
-            self.root.after(0, lambda: self.run_btn.config(state=tk.NORMAL))
-            self.root.after(0, self._update_action_buttons)
+            self._call_ui(self._on_flow_thread_done)
+
+    def _on_flow_finished_ok(self):
+        self._update_status("Completed", COLORS["done"])
+        messagebox.showinfo("Success", "Flow completed successfully!", parent=self.window)
+
+    def _on_flow_finished_error(self, err_msg: str):
+        self._update_status("Failed", COLORS["failed"])
+        messagebox.showerror(
+            "Error",
+            f"Flow execution failed:\n{err_msg}",
+            parent=self.window,
+        )
+
+    def _on_flow_thread_done(self):
+        try:
+            self.run_btn.config(state=tk.NORMAL)
+        except tk.TclError:
+            pass
+        self._update_action_buttons()
 
     def _stop_flow(self):
         alive = self.job_registry.alive_entries()

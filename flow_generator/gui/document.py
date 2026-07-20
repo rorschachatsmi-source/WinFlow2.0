@@ -230,6 +230,10 @@ class FlowDocument:
 
         new_key = _job_key(stage_name, task_name, job["name"])
         self._relocate_key(key, new_key)
+        if key != new_key:
+            from flow_generator.gui.deps import _rewrite_dummy_paths_for_key
+
+            _rewrite_dummy_paths_for_key(self, key, new_key)
         return new_key
 
     def update_job(
@@ -275,10 +279,53 @@ class FlowDocument:
         elif new_key not in self.positions:
             self.positions[new_key] = auto_layout_position(self, new_key)
 
+        if key != new_key:
+            # Keep auto dummy deps (.winflow/deps/...) aligned with the new key
+            # so parent/child file links survive stage/task renames.
+            from flow_generator.gui.deps import _rewrite_dummy_paths_for_key
+
+            _rewrite_dummy_paths_for_key(self, key, new_key)
+
         return new_key
 
 
+def reorder_document_by_canvas(document: FlowDocument) -> None:
+    """Reorder stages / tasks / jobs to match the canvas layout.
+
+    The runner executes stages in JSON list order and jobs within a task in
+    list order. The editor often leaves those lists out of sync with the
+    left-to-right / top-to-bottom canvas (e.g. renamed stages are appended).
+    Call this before export / sync so flow.json matches what the user sees.
+    """
+
+    def _pos(stage_name: str, task_name: str, job_name: str) -> Tuple[float, float]:
+        return document.positions.get(_job_key(stage_name, task_name, job_name), (0.0, 0.0))
+
+    for stage in document.stages:
+        stage_name = stage["name"]
+        for task in stage["tasks"]:
+            task_name = task["name"]
+            task["jobs"].sort(key=lambda job: _pos(stage_name, task_name, job["name"])[1])
+
+        def _task_y(task: Task, _sn: str = stage_name) -> float:
+            ys = [_pos(_sn, task["name"], job["name"])[1] for job in task["jobs"]]
+            return min(ys) if ys else 0.0
+
+        stage["tasks"].sort(key=_task_y)
+
+    def _stage_x(stage: Stage) -> float:
+        xs = [
+            _pos(stage["name"], task["name"], job["name"])[0]
+            for task in stage["tasks"]
+            for job in task["jobs"]
+        ]
+        return min(xs) if xs else 0.0
+
+    document.stages.sort(key=_stage_x)
+
+
 def document_to_flow(document: FlowDocument) -> Flow:
+    reorder_document_by_canvas(document)
     return make_flow(document.flow_name, copy.deepcopy(document.stages), document.poll_interval)
 
 

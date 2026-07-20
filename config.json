@@ -60,19 +60,45 @@
       "lvs": "run_lvs.sh"
     },
     "files": {
-      "apr_gds": "apr.gds.gz",
-      "laker_top_lib_tcl": "laker_topLib.tcl",
-      "sub_dmexcl_calibre": "sub_dmexcl.calibre",
-      "create_text_tcl": "create_text_from_APRgds.tcl",
-      "drc_report": "DRC.rep",
-      "spi_input_spi": "{top}.spi",
-      "spi_input_netlist": "netlist.pg.v.gz",
-      "spi_output": "{top}.cdl",
-      "rcxt_output": "flag_starrc_done",
-      "lvs_hcell": "hcell",
-      "lvs_calibre": "lvs.calibre",
-      "lvs_layout_spi": "layout.spi",
-      "lvs_report": "lvs.rep"
+      "apr_gds": "{data_dir}/apr.gds.gz",
+      "apr_blitz": "{laker_dir}/{top}_APR.blitz++",
+      "full_gds": "{gds_dir}/{top}_FULL.gds.gz",
+      "sub_block_gds": "{workdir}/GDS/{block}.gds.gz",
+      "sub_block_blitz": "{laker_dir}/{block}.blitz++",
+      "sub_dmexcl_calibre": "{laker_dir}/sub_dmexcl.calibre",
+      "sub_dummy_gds": "{laker_dir}/{block}_dummy.gds.gz",
+      "create_text_tcl": "{laker_dir}/create_text_from_APRgds.tcl",
+      "laker_top_lib_tcl": "{data_dir}/laker_topLib.tcl",
+      "merge_tag_gds": "{gds_dir}/{tag}.gds",
+      "merge_tag_gds_gz": "{gds_dir}/{tag}.gds.gz",
+      "merge_blitz": "{laker_dir}/{top}_{tag}.blitz++",
+      "lib_blitz": "{laker_dir}/{final_top}_LIB.blitz++",
+      "final_gds": "{gds_dir}/{final_top}.gds.gz",
+      "final_oas": "{gds_dir}/{final_top}.oas",
+      "spi_inputs": [
+        "{top}.spi",
+        "{data_dir}/netlist.pg.v.gz"
+      ],
+      "spi_outputs": [
+        "{spi_dir}/{top}.cdl"
+      ],
+      "rcxt_inputs": [
+        "{gds_dir}/DM.gds"
+      ],
+      "rcxt_outputs": [
+        "flag_starrc_done"
+      ],
+      "lvs_inputs": [
+        "hcell",
+        "lvs.calibre",
+        "layout.spi",
+        "{gds_dir}/{final_top}.oas",
+        "{spi_dir}/{top}.cdl"
+      ],
+      "lvs_outputs": [
+        "lvs.rep"
+      ],
+      "drc_report": "DRC.rep"
     },
     "merge_flags": [
       {"setting_key": "FLAG_DMF", "script": "dmf", "tag": "DM"},

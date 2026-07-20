@@ -16,8 +16,8 @@ def stream_out_top_stage(
 ) -> Stage:
     paths = config.paths
     scripts = config.scripts
+    files = config.files
     top = config.top
-    final_top = config.final_top
 
     main_task = make_task(
         f"{top}_streamOut_TOP",
@@ -26,7 +26,7 @@ def stream_out_top_stage(
                 "laker_topLib",
                 f"{paths.flow_dir}/{scripts.laker_topLib}",
                 laker_outputs,
-                [f"{paths.laker_dir}/{final_top}_LIB.blitz++"],
+                [config.io(files.lib_blitz)],
                 config.queue,
                 config.cpu,
             ),
@@ -34,18 +34,18 @@ def stream_out_top_stage(
                 f"{top}_Out",
                 f"{paths.flow_dir}/{scripts.bzgdsout_top}",
                 [
-                    f"{paths.laker_dir}/{final_top}_LIB.blitz++",
-                    f"{paths.gds_dir}/{top}_FULL.gds.gz",
+                    config.io(files.lib_blitz),
+                    config.io(files.full_gds),
                 ],
-                [f"{paths.gds_dir}/{final_top}.gds.gz"],
+                [config.io(files.final_gds)],
                 config.queue,
                 config.cpu,
             ),
             make_job(
                 "gds2oas",
                 f"{paths.flow_dir}/{scripts.gds2oas}",
-                [f"{paths.gds_dir}/{final_top}.gds.gz"],
-                [f"{paths.gds_dir}/{final_top}.oas"],
+                [config.io(files.final_gds)],
+                [config.io(files.final_oas)],
                 config.queue,
                 config.cpu,
             ),

@@ -75,19 +75,47 @@ class PVScriptsConfig:
 
 @dataclass(frozen=True)
 class PVFilesConfig:
-    apr_gds: str = "apr.gds.gz"
-    laker_top_lib_tcl: str = "laker_topLib.tcl"
-    sub_dmexcl_calibre: str = "sub_dmexcl.calibre"
-    create_text_tcl: str = "create_text_from_APRgds.tcl"
+    """Full PV job I/O path templates (composition lives in config, not Python).
+
+    Placeholders: ``{top}``, ``{final_top}``, ``{block}``, ``{workdir}``, ``{tag}``,
+    ``{laker_dir}``, ``{gds_dir}``, ``{data_dir}``, ``{spi_dir}``, ``{flow_dir}``.
+    """
+
+    # Stream-in / APR
+    apr_gds: str = "{data_dir}/apr.gds.gz"
+    apr_blitz: str = "{laker_dir}/{top}_APR.blitz++"
+    full_gds: str = "{gds_dir}/{top}_FULL.gds.gz"
+    sub_block_gds: str = "{workdir}/GDS/{block}.gds.gz"
+    sub_block_blitz: str = "{laker_dir}/{block}.blitz++"
+    sub_dmexcl_calibre: str = "{laker_dir}/sub_dmexcl.calibre"
+    sub_dummy_gds: str = "{laker_dir}/{block}_dummy.gds.gz"
+
+    # Merge / text
+    create_text_tcl: str = "{laker_dir}/create_text_from_APRgds.tcl"
+    laker_top_lib_tcl: str = "{data_dir}/laker_topLib.tcl"
+    merge_tag_gds: str = "{gds_dir}/{tag}.gds"
+    merge_tag_gds_gz: str = "{gds_dir}/{tag}.gds.gz"
+    merge_blitz: str = "{laker_dir}/{top}_{tag}.blitz++"
+
+    # Stream-out TOP
+    lib_blitz: str = "{laker_dir}/{final_top}_LIB.blitz++"
+    final_gds: str = "{gds_dir}/{final_top}.gds.gz"
+    final_oas: str = "{gds_dir}/{final_top}.oas"
+
+    # SPI / RCXT / LVS / DRC (lists = easy to add paths in config.json)
+    spi_inputs: Tuple[str, ...] = ("{top}.spi", "{data_dir}/netlist.pg.v.gz")
+    spi_outputs: Tuple[str, ...] = ("{spi_dir}/{top}.cdl",)
+    rcxt_inputs: Tuple[str, ...] = ("{gds_dir}/DM.gds",)
+    rcxt_outputs: Tuple[str, ...] = ("flag_starrc_done",)
+    lvs_inputs: Tuple[str, ...] = (
+        "hcell",
+        "lvs.calibre",
+        "layout.spi",
+        "{gds_dir}/{final_top}.oas",
+        "{spi_dir}/{top}.cdl",
+    )
+    lvs_outputs: Tuple[str, ...] = ("lvs.rep",)
     drc_report: str = "DRC.rep"
-    spi_input_spi: str = "{top}.spi"
-    spi_input_netlist: str = "netlist.pg.v.gz"
-    spi_output: str = "{top}.cdl"
-    rcxt_output: str = "flag_starrc_done"
-    lvs_hcell: str = "hcell"
-    lvs_calibre: str = "lvs.calibre"
-    lvs_layout_spi: str = "layout.spi"
-    lvs_report: str = "lvs.rep"
 
 
 @dataclass(frozen=True)
