@@ -16,8 +16,11 @@ def stream_out_top_stage(
 ) -> Stage:
     paths = config.paths
     scripts = config.scripts
-    files = config.files
     top = config.top
+
+    _, top_lib_out = config.job_io("laker_topLib")
+    top_out_in, top_out_out = config.job_io("top_Out")
+    gds_in, gds_out = config.job_io("gds2oas")
 
     main_task = make_task(
         f"{top}_streamOut_TOP",
@@ -25,27 +28,25 @@ def stream_out_top_stage(
             make_job(
                 "laker_topLib",
                 f"{paths.flow_dir}/{scripts.laker_topLib}",
+                # Dynamic merge outputs (blitz + text + tcl), not the static node sample.
                 laker_outputs,
-                [config.io(files.lib_blitz)],
+                top_lib_out,
                 config.queue,
                 config.cpu,
             ),
             make_job(
                 f"{top}_Out",
                 f"{paths.flow_dir}/{scripts.bzgdsout_top}",
-                [
-                    config.io(files.lib_blitz),
-                    config.io(files.full_gds),
-                ],
-                [config.io(files.final_gds)],
+                top_out_in,
+                top_out_out,
                 config.queue,
                 config.cpu,
             ),
             make_job(
                 "gds2oas",
                 f"{paths.flow_dir}/{scripts.gds2oas}",
-                [config.io(files.final_gds)],
-                [config.io(files.final_oas)],
+                gds_in,
+                gds_out,
                 config.queue,
                 config.cpu,
             ),

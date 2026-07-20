@@ -997,6 +997,7 @@ class FlowRunnerGUI:
         self.job_registry = JobRegistry()
         self.kill_monitor = JobKillMonitor(self)
         self.sync_btn: Optional[tk.Button] = None
+        self.verify_btn: Optional[tk.Button] = None
         self._suppress_auto_load = False
         # Tk is not thread-safe: never call root.after / widgets from worker threads.
         self._ui_queue: queue.Queue = queue.Queue()
@@ -1138,6 +1139,13 @@ class FlowRunnerGUI:
             state=tk.DISABLED, font=(UI_FONT, 9, "bold"), relief=tk.FLAT
         )
         self.stop_btn.pack(pady=6, padx=10)
+
+        self.verify_btn = tk.Button(
+            rail, text="Verify Outputs", command=self._verify_all_outputs,
+            bg="#8250df", fg="white", width=14, height=2,
+            state=tk.DISABLED, font=(UI_FONT, 9, "bold"), relief=tk.FLAT
+        )
+        self.verify_btn.pack(pady=6, padx=10)
 
         tk.Button(
             rail, text="Clear Logs", command=self._clear_logs,
@@ -1337,6 +1345,9 @@ class FlowRunnerGUI:
             self.stop_btn.config(
                 state=tk.NORMAL if (alive or has_kill_targets) else tk.DISABLED
             )
+        if self.verify_btn:
+            can_verify = bool(self.graph_model and self.graph_model.nodes) and not self.is_running
+            self.verify_btn.config(state=tk.NORMAL if can_verify else tk.DISABLED)
         self._update_sync_button()
 
     def _can_sync(self) -> bool:
@@ -1796,6 +1807,84 @@ class FlowRunnerGUI:
             return
 
         self._request_kill_entries(alive)
+
+    def _verify_all_outputs(self):
+        """Check that every job's output files exist; update node statuses."""
+        parent = self.window
+        if not self.graph_model or not self.graph_model.nodes:
+            messagebox.showinfo("Verify Outputs", "No jobs loaded.", parent=parent)
+            return
+        if self.is_running:
+            messagebox.showinfo(
+                "Verify Outputs",
+                "Cannot verify while a flow is running.",
+                parent=parent,
+            )
+            return
+
+        ok_jobs: List[str] = []
+        bad_jobs: List[Tuple[str, List[str]]] = []
+        skipped = 0
+
+        for node in self.graph_model.nodes:
+            outputs = node.get("outputs") or []
+            label = node.get("label") or node.get("key", "?")
+            if not outputs:
+                skipped += 1
+                continue
+            missing = [path for path in outputs if not os.path.exists(path)]
+            if missing:
+                node["status"] = "EXIT"
+                bad_jobs.append((label, missing))
+            else:
+                node["status"] = "DONE"
+                if node.get("start_time") and not node.get("end_time"):
+                    node["end_time"] = datetime.now()
+                ok_jobs.append(label)
+
+        self.completed_jobs = sum(
+            1
+            for node in self.graph_model.nodes
+            if node.get("status") in ("DONE", "done", "EXIT", "failed")
+        )
+        self.graph_canvas.redraw()
+        self._update_action_buttons()
+
+        if bad_jobs:
+            lines = [f"{name}: missing {len(paths)} file(s)" for name, paths in bad_jobs]
+            detail = "\n".join(
+                f"  - {path}" for _name, paths in bad_jobs for path in paths[:5]
+            )
+            more = sum(max(0, len(paths) - 5) for _n, paths in bad_jobs)
+            if more:
+                detail += f"\n  ... and {more} more"
+            self._log_callback(
+                f"Verify Outputs: {len(ok_jobs)} OK, {len(bad_jobs)} missing outputs",
+                "ERROR",
+            )
+            messagebox.showerror(
+                "Verify Outputs",
+                f"{len(ok_jobs)} job(s) OK, {len(bad_jobs)} job(s) missing outputs"
+                + (f", {skipped} with no outputs" if skipped else "")
+                + ":\n\n"
+                + "\n".join(lines)
+                + ("\n\n" + detail if detail else ""),
+                parent=parent,
+            )
+            return
+
+        self._log_callback(
+            f"Verify Outputs: all {len(ok_jobs)} job(s) have outputs"
+            + (f" ({skipped} with no outputs skipped)" if skipped else ""),
+            "INFO",
+        )
+        messagebox.showinfo(
+            "Verify Outputs",
+            f"All output files exist for {len(ok_jobs)} job(s)."
+            + (f"\n({skipped} job(s) have no outputs and were skipped.)" if skipped else "")
+            + "\nStatuses set to DONE.",
+            parent=parent,
+        )
 
     def _update_status(self, status: str, color: str = COLORS["accent"]):
         self.status_label.config(text=status, fg=color)

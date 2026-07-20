@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Sequence, TYPE_CHECKING
+from typing import Dict, List, Sequence, Tuple, TYPE_CHECKING
 
 from flow_generator.core.context import BuildContext
 from flow_generator.flows.pv.io import format_pv_io, format_pv_io_list
 from flow_generator.flows.pv.paths import PVPaths
 from winflow_config import get_config
+from winflow_config.models import JobIOConfig
 
 if TYPE_CHECKING:
-    from winflow_config.models import PVFilesConfig, PVScriptsConfig
+    from winflow_config.models import PVScriptsConfig
 
 
 @dataclass(frozen=True)
@@ -23,7 +24,7 @@ class PVConfig:
     dmexcl_ptn: bool
     paths: PVPaths
     scripts: "PVScriptsConfig"
-    files: "PVFilesConfig"
+    jobs: Dict[str, JobIOConfig]
 
     @classmethod
     def from_context(cls, context: BuildContext) -> "PVConfig":
@@ -39,11 +40,11 @@ class PVConfig:
             dmexcl_ptn=settings.get("FLAG_DMEXCL_PTN", "0") == "1",
             paths=PVPaths.from_settings(settings),
             scripts=pv_cfg.scripts,
-            files=pv_cfg.files,
+            jobs=pv_cfg.jobs,
         )
 
     def io(self, template: str, **extra: str) -> str:
-        """Expand one ``pv.files`` path template."""
+        """Expand one path template."""
         return format_pv_io(
             template,
             paths=self.paths,
@@ -53,7 +54,7 @@ class PVConfig:
         )
 
     def io_list(self, templates: Sequence[str], **extra: str) -> List[str]:
-        """Expand a list of ``pv.files`` path templates."""
+        """Expand a list of path templates."""
         return format_pv_io_list(
             templates,
             paths=self.paths,
@@ -61,6 +62,14 @@ class PVConfig:
             final_top=self.final_top,
             **extra,
         )
+
+    def job_io(self, name: str, **extra: str) -> Tuple[List[str], List[str]]:
+        """Return expanded (inputs, outputs) for a named job in ``pv.jobs``."""
+        spec = self.jobs.get(name)
+        if spec is None:
+            raise KeyError(f"Unknown PV job I/O config: {name!r}")
+        inputs, outputs, _command = spec.resolved()
+        return self.io_list(inputs, **extra), self.io_list(outputs, **extra)
 
 
 def flag_enabled(settings: Dict[str, str], key: str) -> bool:

@@ -9,10 +9,6 @@ from flow_generator.flows.pv.config import PVConfig, flag_enabled
 from flow_generator.flows.pv.stages.spi_rcxt_lvs import lvs_task
 
 
-def _oas_input(config: PVConfig) -> str:
-    return config.io(config.files.final_oas)
-
-
 def _use_drc_stage_name(settings: Dict[str, str]) -> bool:
     return flag_enabled(settings, "FLAG_DRC") or (
         not flag_enabled(settings, "FLAG_DRCBE")
@@ -20,50 +16,16 @@ def _use_drc_stage_name(settings: Dict[str, str]) -> bool:
     )
 
 
-def _generic_drc_task(config: PVConfig) -> Task:
-    paths = config.paths
+def _drc_task(config: PVConfig, name: str) -> Task:
+    inputs, outputs = config.job_io(name)
     return make_task(
-        "DRC",
+        name,
         [
             make_job(
-                "DRC",
-                f"{paths.flow_dir}/{config.scripts.run_drc} DRC",
-                [_oas_input(config)],
-                [config.io(config.files.drc_report)],
-                config.queue,
-                config.cpu,
-            )
-        ],
-    )
-
-
-def _drc_be_task(config: PVConfig) -> Task:
-    paths = config.paths
-    return make_task(
-        "DRC_BE",
-        [
-            make_job(
-                "DRC_BE",
-                f"{paths.flow_dir}/{config.scripts.run_drc} DRC_BE",
-                [_oas_input(config)],
-                [config.io(config.files.drc_report)],
-                config.queue,
-                config.cpu,
-            )
-        ],
-    )
-
-
-def _drc_fe_task(config: PVConfig) -> Task:
-    paths = config.paths
-    return make_task(
-        "DRC_FE",
-        [
-            make_job(
-                "DRC_FE",
-                f"{paths.flow_dir}/{config.scripts.run_drc} DRC_FE",
-                [_oas_input(config)],
-                [config.io(config.files.drc_report)],
+                name,
+                f"{config.paths.flow_dir}/{config.scripts.run_drc} {name}",
+                inputs,
+                outputs,
                 config.queue,
                 config.cpu,
             )
@@ -80,13 +42,13 @@ def build_post_gds2oas_stage(
     use_drc_stage = _use_drc_stage_name(settings)
 
     if use_drc_stage:
-        tasks.append(_generic_drc_task(config))
+        tasks.append(_drc_task(config, "DRC"))
 
     if flag_enabled(settings, "FLAG_DRCBE"):
-        tasks.append(_drc_be_task(config))
+        tasks.append(_drc_task(config, "DRC_BE"))
 
     if flag_enabled(settings, "FLAG_DRCFE"):
-        tasks.append(_drc_fe_task(config))
+        tasks.append(_drc_task(config, "DRC_FE"))
 
     if flag_enabled(settings, "FLAG_LVS"):
         tasks.append(lvs_task(config))

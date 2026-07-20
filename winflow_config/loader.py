@@ -55,10 +55,35 @@ def _merge_value(current: Any, update: Any, field_type: Any = None) -> Any:
     if is_dataclass(current):
         if not isinstance(update, dict):
             return current
+        from_mapping = getattr(type(current), "from_mapping", None)
+        if callable(from_mapping):
+            override = from_mapping(update)
+            merge_over = getattr(current, "merge_over", None)
+            if callable(merge_over):
+                return merge_over(override)
+            return override
         return merge_dataclass(current, update)
     origin = get_origin(field_type) if field_type is not None else get_origin(type(current))
+    args = get_args(field_type) if field_type is not None else ()
+    if origin is dict and isinstance(update, dict):
+        if args and len(args) >= 2 and is_dataclass(args[1]):
+            item_type = args[1]
+            from_mapping = getattr(item_type, "from_mapping", None)
+            parsed = {}
+            for key, value in update.items():
+                if isinstance(value, dict) and callable(from_mapping):
+                    parsed[key] = from_mapping(value)
+                elif isinstance(value, dict):
+                    parsed[key] = item_type(**value)
+                else:
+                    parsed[key] = value
+            # Keep defaults for keys not present in JSON.
+            merged = dict(current) if isinstance(current, dict) else {}
+            merged.update(parsed)
+            return merged
+        return dict(update)
     if origin is tuple and isinstance(update, list):
-        inner_types = get_args(field_type) if field_type is not None else get_args(type(current))
+        inner_types = args if args else get_args(type(current))
         if inner_types and is_dataclass(inner_types[0]):
             item_type = inner_types[0]
             return tuple(

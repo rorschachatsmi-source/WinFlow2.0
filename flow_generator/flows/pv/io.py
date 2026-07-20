@@ -15,7 +15,7 @@ def format_pv_io(
     final_top: Optional[str] = None,
     **extra: str,
 ) -> str:
-    """Expand a full I/O path template from ``pv.files``.
+    """Expand a full I/O path template.
 
     Supported placeholders:
     ``{top}``, ``{final_top}``, ``{block}``, ``{workdir}``, ``{tag}``,

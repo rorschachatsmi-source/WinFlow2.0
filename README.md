@@ -218,7 +218,7 @@ cfg = get_config(reload=True)
 | `paths.flow_dir`    | Shell script directory (default `../flow`; override via `FLOW_DIR`)              |
 | `paths.data_dir`    | Input data directory (default `../DATA`; override via `DATA_DIR`)                |
 | `scripts.*`         | Shell script filenames used by PV stage builders                                 |
-| `files.*`           | Full job I/O path templates (e.g. `spi_inputs`, `{data_dir}/apr.gds.gz`)         |
+| `jobs.<name>`       | Per-job `inputs` / `outputs` path templates (edit I/O by job name)               |
 | `merge_flags`       | Maps `setting.sh` flags to merge scripts and GDS tags                            |
 
 
@@ -230,8 +230,8 @@ cfg = get_config(reload=True)
 | `flow_name`             | `APR`                                                | Generated flow name                                   |
 | `stage_name`            | `APR`                                                | Stage name in output JSON                             |
 | `task_name`             | `apr`                                                | Task name in output JSON                              |
-| `run_stage_template`    | `./run_stage {job_name}`                             | Command template per job                              |
-| `output_template`       | `{job_name}/DB/{job_name}.enc.dat`                   | Output path template                                  |
+| `default_job`           | Default `command` / `inputs` / `outputs` (supports `{prev_output}`) |
+| `jobs.<stage>`          | Optional per-stage I/O overrides (e.g. first stage `inputs: []`)    |
 | `stages_before_current` | `01_floorplan`, `02_prects_opt`, `03_cts_concurrent` | APR stages always included                            |
 | `current_stage`         | `04_postcts_opt`                                     | Included only when `APR_IS_CURRENT=1` in `setting.sh` |
 | `stages_after_current`  | `05_route.tcl`, `06_postroute_opt`                   | Stages after CTS                                      |

@@ -25,7 +25,7 @@ def sample_config(**overrides):
         "dmexcl_ptn": False,
         "paths": PVPaths.defaults(),
         "scripts": pv_cfg.scripts,
-        "files": pv_cfg.files,
+        "jobs": pv_cfg.jobs,
     }
     values.update(overrides)
     return PVConfig(**values)

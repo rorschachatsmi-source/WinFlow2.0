@@ -8,7 +8,7 @@ from typing import List, Optional, Tuple
 
 from flow_generator.core.io import write_flow
 from flow_generator.core.models import Job, make_flow, make_job, make_stage, make_task
-from flow_generator.flows.pv.io import format_pv_io, format_pv_io_list
+from flow_generator.flows.pv.io import format_pv_io_list
 from flow_generator.flows.pv.paths import PVPaths
 from winflow_config import get_config
 
@@ -135,8 +135,8 @@ def _pv_scripts():
     return get_config().pv.scripts
 
 
-def _pv_files():
-    return get_config().pv.files
+def _pv_jobs():
+    return get_config().pv.jobs
 
 
 def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
@@ -152,18 +152,20 @@ def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
     blank_flow = gen.blank_flow_name
     paths = PVPaths.defaults()
     scripts = _pv_scripts()
-    files = _pv_files()
+    jobs_cfg = _pv_jobs()
     queue = gen.default_queue
     cpu = gen.default_cpu
     top = PLACEHOLDER_TOP
     block = PLACEHOLDER_BLOCK
     workdir = PLACEHOLDER_WORKDIR
 
-    def io(template: str, **extra: str) -> str:
-        return format_pv_io(template, paths=paths, top=top, final_top=top, **extra)
-
     def io_list(templates, **extra: str) -> List[str]:
         return format_pv_io_list(templates, paths=paths, top=top, final_top=top, **extra)
+
+    def job_io(name: str, **extra: str) -> Tuple[List[str], List[str]]:
+        spec = jobs_cfg[name]
+        inputs, outputs, _cmd = spec.resolved()
+        return io_list(inputs, **extra), io_list(outputs, **extra)
 
     nodes: List[Tuple[str, str, Job]] = []
 
@@ -176,132 +178,100 @@ def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
         make_job("job_1", "", [], [], queue, gen.new_job_cpu),
     )
 
+    from flow_generator.flows.apr.builder import _expand_apr_paths, _resolve_stage_io
+
     apr_bases = list(apr.stages_before_current) + [apr.current_stage] + list(apr.stages_after_current)
     for base in apr_bases:
-        output = apr.output_template.format(job_name=base)
+        in_t, out_t, cmd_t = _resolve_stage_io(base)
+        # Node library: no previous job — drop {prev_output}.
+        inputs = _expand_apr_paths(in_t, job_name=base, prev_output=None)
+        outputs = _expand_apr_paths(out_t, job_name=base, prev_output=None)
         add(
             base,
             apr_flow,
             make_job(
                 base,
-                apr.run_stage_template.format(job_name=base),
-                [],
-                [output],
+                cmd_t.format(job_name=base, prev_output=""),
+                inputs,
+                outputs,
                 apr.default_queue,
                 int(apr.default_cpu) if str(apr.default_cpu).isdigit() else cpu,
             ),
         )
 
+    cal_in, cal_out = job_io("sub_calibre", block=block, workdir=workdir)
     add(
         "sub_calibre",
         pv_flow,
         make_job(
             f"{block}_calibre",
             f"{paths.flow_dir}/{scripts.sub_calibre_dm} {block} {workdir}",
-            [io(files.sub_dmexcl_calibre, block=block, workdir=workdir)],
-            [io(files.sub_dummy_gds, block=block, workdir=workdir)],
+            cal_in,
+            cal_out,
             queue,
             cpu,
         ),
     )
+    lak_in, lak_out = job_io("sub_laker", block=block, workdir=workdir)
     add(
         "sub_laker",
         pv_flow,
         make_job(
             f"{block}_laker",
             f"{paths.flow_dir}/{scripts.sub_bzgdsin_apr} {block} {workdir}",
-            [io(files.sub_block_gds, block=block, workdir=workdir)],
-            [io(files.sub_block_blitz, block=block, workdir=workdir)],
+            lak_in,
+            lak_out,
             queue,
             cpu,
         ),
     )
-    add(
-        "laker_In",
-        pv_flow,
-        make_job(
-            "laker_In",
-            f"{paths.flow_dir}/{scripts.bzgdsin_apr}",
-            [io(files.apr_gds)],
-            [io(files.apr_blitz)],
-            queue,
-            cpu,
-        ),
-    )
-    add(
-        "laker_pre_In",
-        pv_flow,
-        make_job(
-            "laker_pre_In",
-            f"{paths.flow_dir}/{scripts.pre_bzgdsin_apr}",
-            [io(files.apr_gds)],
-            [io(files.apr_blitz)],
-            queue,
-            cpu,
-        ),
-    )
-    add(
-        "laker_Out",
-        pv_flow,
-        make_job(
-            "laker_Out",
-            f"{paths.flow_dir}/{scripts.bzgdsout_apr}",
-            [io(files.apr_blitz)],
-            [io(files.full_gds)],
-            queue,
-            cpu,
-        ),
-    )
-    add(
-        "SPI",
-        pv_flow,
-        make_job(
-            "SPI",
-            f"{paths.flow_dir}/{scripts.spi}",
-            io_list(files.spi_inputs),
-            io_list(files.spi_outputs),
-            queue,
-            cpu,
-        ),
-    )
-    add(
-        "RCXT",
-        pv_flow,
-        make_job(
-            "RCXT",
-            f"{paths.flow_dir}/{scripts.rcxt}",
-            io_list(files.rcxt_inputs),
-            io_list(files.rcxt_outputs),
-            queue,
-            cpu,
-        ),
-    )
-    add(
-        "LVS",
-        pv_flow,
-        make_job(
-            "LVS",
-            f"{paths.flow_dir}/{scripts.lvs}",
-            io_list(files.lvs_inputs),
-            io_list(files.lvs_outputs),
-            queue,
-            cpu,
-        ),
-    )
+    for stem, script_attr in (
+        ("laker_In", "bzgdsin_apr"),
+        ("laker_pre_In", "pre_bzgdsin_apr"),
+        ("laker_Out", "bzgdsout_apr"),
+    ):
+        inputs, outputs = job_io(stem)
+        add(
+            stem,
+            pv_flow,
+            make_job(
+                stem,
+                f"{paths.flow_dir}/{getattr(scripts, script_attr)}",
+                inputs,
+                outputs,
+                queue,
+                cpu,
+            ),
+        )
+    for stem, script_attr in (("SPI", "spi"), ("RCXT", "rcxt"), ("LVS", "lvs")):
+        inputs, outputs = job_io(stem)
+        add(
+            stem,
+            pv_flow,
+            make_job(
+                stem,
+                f"{paths.flow_dir}/{getattr(scripts, script_attr)}",
+                inputs,
+                outputs,
+                queue,
+                cpu,
+            ),
+        )
 
     for flag_cfg in get_config().pv.merge_flags:
         script = flag_cfg.script
         tag = flag_cfg.tag
-        tag_gds_tmpl = files.merge_tag_gds_gz if tag == "DMEXCL" else files.merge_tag_gds
-        gds_outs = [io(tag_gds_tmpl, tag=tag)]
+        calibre_key = "Calibre_merge_gz" if tag == "DMEXCL" else "Calibre_merge"
+        c_in, c_out = job_io(calibre_key, tag=tag)
+        _, l_out = job_io("laker_merge", tag=tag)
         add(
             f"Calibre_{script}",
             pv_flow,
             make_job(
                 f"Calibre_{script}",
                 f"{paths.flow_dir}/{script}.sh",
-                [io(files.full_gds)],
-                gds_outs,
+                c_in,
+                c_out,
                 queue,
                 cpu,
             ),
@@ -312,81 +282,55 @@ def builtin_node_jobs() -> List[Tuple[str, str, Job]]:
             make_job(
                 f"laker_{script}",
                 f"{paths.flow_dir}/bzgdsin_{script}.sh",
-                gds_outs,
-                [io(files.merge_blitz, tag=tag)],
+                c_out,
+                l_out,
                 queue,
                 cpu,
             ),
         )
 
-    add(
-        "laker_text",
-        pv_flow,
-        make_job(
-            "laker_text",
-            f"{paths.flow_dir}/{scripts.laker_text}",
-            [
-                io(files.apr_blitz),
-                io(files.full_gds),
-            ],
-            [io(files.create_text_tcl)],
-            queue,
-            cpu,
-        ),
-    )
-    add(
-        "laker_topLib",
-        pv_flow,
-        make_job(
-            "laker_topLib",
-            f"{paths.flow_dir}/{scripts.laker_topLib}",
-            [
-                io(files.merge_blitz, tag="DM"),
-                io(files.create_text_tcl),
-                io(files.laker_top_lib_tcl),
-            ],
-            [io(files.lib_blitz)],
-            queue,
-            cpu,
-        ),
-    )
+    for stem, script_attr in (
+        ("laker_text", "laker_text"),
+        ("laker_topLib", "laker_topLib"),
+        ("gds2oas", "gds2oas"),
+    ):
+        inputs, outputs = job_io(stem)
+        add(
+            stem,
+            pv_flow,
+            make_job(
+                stem,
+                f"{paths.flow_dir}/{getattr(scripts, script_attr)}",
+                inputs,
+                outputs,
+                queue,
+                cpu,
+            ),
+        )
+    top_in, top_out = job_io("top_Out")
     add(
         "top_Out",
         pv_flow,
         make_job(
             f"{top}_Out",
             f"{paths.flow_dir}/{scripts.bzgdsout_top}",
-            [
-                io(files.lib_blitz),
-                io(files.full_gds),
-            ],
-            [io(files.final_gds)],
-            queue,
-            cpu,
-        ),
-    )
-    add(
-        "gds2oas",
-        pv_flow,
-        make_job(
-            "gds2oas",
-            f"{paths.flow_dir}/{scripts.gds2oas}",
-            [io(files.final_gds)],
-            [io(files.final_oas)],
+            top_in,
+            top_out,
             queue,
             cpu,
         ),
     )
 
     for drc_name in ("DRC", "DRC_BE", "DRC_FE"):
+        inputs, outputs = job_io(drc_name)
         add(
             drc_name,
             pv_flow,
             make_job(
                 drc_name,
                 f"{paths.flow_dir}/{scripts.run_drc} {drc_name}",
-                [io(files.final_oas)],
-                [io(files.drc_report)],
+                inputs,
+                outputs,
                 queue,
                 cpu,
             ),
