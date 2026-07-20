@@ -67,6 +67,10 @@ class WinFlowApp(tk.Tk):
 
         self.runner = run_gui.FlowRunnerGUI(runner_tab, sync_source=self.generator)
 
+        # Runner re-applies the clam theme and would wipe Generator's checkmark
+        # indicators — reinstall after both panels are built.
+        gen_gui._install_checkmark_checkbuttons(style, self)
+
 
 def main():
     app = WinFlowApp()

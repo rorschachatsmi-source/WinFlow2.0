@@ -196,7 +196,31 @@ def _setup_styles(root: tk.Misc) -> ttk.Style:
         foreground=COLORS["text"],
         padding=4,
     )
+    _install_checkmark_checkbuttons(style, root)
     return style
+
+
+def _install_checkmark_checkbuttons(style: ttk.Style, master: tk.Misc) -> None:
+    """No-op kept for winflow_gui compatibility (dialogs use tk.Checkbutton)."""
+    del style, master
+
+
+def _option_checkbutton(parent: tk.Misc, text: str, variable: tk.BooleanVar) -> tk.Checkbutton:
+    """Visible checkbox that is not affected by clam ttk theme artwork."""
+    return tk.Checkbutton(
+        parent,
+        text=text,
+        variable=variable,
+        bg=COLORS["panel"],
+        fg=COLORS["text"],
+        activebackground=COLORS["panel"],
+        activeforeground=COLORS["text"],
+        selectcolor=COLORS["panel_alt"],
+        font=FONTS["body"],
+        anchor="w",
+        highlightthickness=0,
+        bd=0,
+    )
 
 
 def _flat_button(
@@ -842,6 +866,21 @@ class TemplateLoadDialog(tk.Toplevel):
         res_frame.columnconfigure(1, weight=1)
 
         if self.template_name == "pv":
+            pv_opts = ttk.LabelFrame(outer, text=" PV options ", style="Card.TLabelframe", padding=10)
+            pv_opts.pack(fill=tk.X, pady=(0, 10))
+            self.use_oasii = tk.BooleanVar(value=True)
+            _option_checkbutton(
+                pv_opts,
+                "Use OASII (add gds2oas after streamOut_TOP; DRC/LVS wait on .oas)",
+                self.use_oasii,
+            ).pack(anchor="w", fill=tk.X)
+            ttk.Label(
+                pv_opts,
+                text="Unchecked: skip gds2oas; DRC/LVS link behind {top}_Out GDS.",
+                style="Muted.TLabel",
+                wraplength=420,
+            ).pack(anchor="w", pady=(4, 0))
+
             pv_frame = ttk.LabelFrame(outer, text=" PV reference files (optional) ", style="Card.TLabelframe", padding=10)
             pv_frame.pack(fill=tk.X, pady=(0, 4))
             ttk.Label(
@@ -861,11 +900,11 @@ class TemplateLoadDialog(tk.Toplevel):
         if self.template_name == "apr":
             apr_frame = ttk.LabelFrame(outer, text=" APR options ", style="Card.TLabelframe", padding=10)
             apr_frame.pack(fill=tk.X, pady=(0, 4))
-            ttk.Checkbutton(
+            _option_checkbutton(
                 apr_frame,
-                text="isCurrent (include 04_postcts_opt)",
-                variable=self.apr_is_current,
-            ).pack(anchor="w", pady=(0, 8))
+                "isCurrent (include 04_postcts_opt)",
+                self.apr_is_current,
+            ).pack(anchor="w", fill=tk.X, pady=(0, 8))
             prefix_row = ttk.Frame(apr_frame, style="Card.TFrame")
             prefix_row.pack(fill=tk.X)
             ttk.Label(prefix_row, text="Prefix", style="Panel.TLabel").pack(side=tk.LEFT)
@@ -886,6 +925,10 @@ class TemplateLoadDialog(tk.Toplevel):
 
         self.bind("<Escape>", lambda _e: self._cancel())
         self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.update_idletasks()
+        req_w = max(self.winfo_reqwidth(), 480)
+        req_h = self.winfo_reqheight()
+        self.geometry(f"{req_w}x{req_h}")
         _activate_modal(self)
 
     def _file_row(self, parent, label: str, var: tk.StringVar, filetypes):
@@ -915,6 +958,9 @@ class TemplateLoadDialog(tk.Toplevel):
             return
         setting = Path(self.setting_path.get()) if self.setting_path.get().strip() else None
         blocks = Path(self.blocks_path.get()) if self.blocks_path.get().strip() else None
+        use_oasii = True
+        if self.template_name == "pv":
+            use_oasii = bool(self.use_oasii.get())
         self.result = TemplateOptions(
             queue=self.queue.get().strip() or gen_cfg.default_queue,
             machine=self.machine.get().strip(),
@@ -923,6 +969,7 @@ class TemplateLoadDialog(tk.Toplevel):
             blocks_path=blocks,
             apr_is_current=self.apr_is_current.get(),
             apr_prefix=self.apr_prefix.get().strip(),
+            use_oasii=use_oasii,
         )
         self.destroy()
 

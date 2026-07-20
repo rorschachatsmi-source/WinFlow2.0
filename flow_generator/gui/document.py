@@ -48,6 +48,7 @@ class TemplateOptions:
     blocks_path: Optional[Path] = None
     apr_is_current: bool = False
     apr_prefix: str = ""
+    use_oasii: bool = True
 
 
 def _job_key(stage: str, task: str, job_name: str) -> JobKey:
@@ -289,6 +290,49 @@ class FlowDocument:
         return new_key
 
 
+def ensure_unique_stage_names(document: FlowDocument) -> List[str]:
+    """Rename later duplicate stage names so runner job keys stay unique.
+
+    Runner / GUI identify jobs as ``stage/task/job``. Two stages both named
+    ``a`` collide (status, edges, skip sets) and a failure in the second ``a``
+    aborts the flow before later stages. Link/unlink does not intentionally
+    create duplicates, but loaded JSON or repeated rename/prune cycles can.
+
+    Later duplicates become ``a_2``, ``a_3``, … (preserving list / canvas order).
+    Returns human-readable notes about renames performed.
+    """
+    from flow_generator.gui.deps import _rewrite_dummy_paths_for_key
+
+    notes: List[str] = []
+    seen_count: Dict[str, int] = {}
+    taken = {stage["name"] for stage in document.stages}
+
+    for stage in document.stages:
+        name = stage["name"]
+        seen_count[name] = seen_count.get(name, 0) + 1
+        if seen_count[name] == 1:
+            continue
+
+        suffix = seen_count[name]
+        new_name = f"{name}_{suffix}"
+        while new_name in taken:
+            suffix += 1
+            new_name = f"{name}_{suffix}"
+        taken.add(new_name)
+
+        for task in stage["tasks"]:
+            for job in task["jobs"]:
+                old_key = _job_key(name, task["name"], job["name"])
+                new_key = _job_key(new_name, task["name"], job["name"])
+                document._relocate_key(old_key, new_key)
+                _rewrite_dummy_paths_for_key(document, old_key, new_key)
+
+        stage["name"] = new_name
+        notes.append(f"renamed duplicate stage {name!r} → {new_name!r}")
+
+    return notes
+
+
 def reorder_document_by_canvas(document: FlowDocument) -> None:
     """Reorder stages / tasks / jobs to match the canvas layout.
 
@@ -325,6 +369,7 @@ def reorder_document_by_canvas(document: FlowDocument) -> None:
 
 
 def document_to_flow(document: FlowDocument) -> Flow:
+    ensure_unique_stage_names(document)
     reorder_document_by_canvas(document)
     return make_flow(document.flow_name, copy.deepcopy(document.stages), document.poll_interval)
 
@@ -335,6 +380,7 @@ def flow_to_document(flow: Flow) -> FlowDocument:
         poll_interval=flow["poll_interval"],
         stages=copy.deepcopy(flow["stages"]),
     )
+    ensure_unique_stage_names(doc)
     auto_layout_all(doc)
     return doc
 
@@ -436,6 +482,7 @@ def pv_template(options: Optional[TemplateOptions] = None) -> FlowDocument:
         build_settings["TOP_MODULE"] = "TOP_MODULE"
     build_settings["MACHINE_QUEUE"] = opts.queue or DEFAULT_QUEUE
     build_settings["MACHINE_CPU"] = str(opts.cpu)
+    build_settings["USE_OASII"] = "1" if opts.use_oasii else "0"
 
     context = BuildContext(
         settings=build_settings,

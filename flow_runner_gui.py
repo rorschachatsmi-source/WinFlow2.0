@@ -354,6 +354,9 @@ class JobRegistry:
     def alive_for_key(self, job_key: str) -> List[Dict]:
         return [e for e in self.alive_entries() if e["job_key"] == job_key]
 
+    def clear(self) -> None:
+        self.entries.clear()
+
 
 class JobKillMonitor:
     """Poll every 15s, re-send bkill until jobs are gone."""
@@ -385,6 +388,10 @@ class JobKillMonitor:
     def add_entries(self, entries: List[Dict]):
         for entry in entries:
             self.add(entry["job_key"], entry["job_id"], entry["lsf_name"])
+
+    def clear(self) -> None:
+        self._stop_timer()
+        self.targets.clear()
 
     def _set_node_status(self, job_key: str, status: str):
         if not self.gui.graph_model:
@@ -1148,7 +1155,7 @@ class FlowRunnerGUI:
         self.verify_btn.pack(pady=6, padx=10)
 
         tk.Button(
-            rail, text="Clear Logs", command=self._clear_logs,
+            rail, text="Reset Flow", command=self._reset_flow,
             bg=COLORS["accent"], fg="white", width=14, height=2,
             font=(UI_FONT, 9, "bold"), relief=tk.FLAT
         ).pack(pady=6, padx=10)
@@ -1351,15 +1358,17 @@ class FlowRunnerGUI:
         self._update_sync_button()
 
     def _can_sync(self) -> bool:
+        """Sync is available whenever Generator is linked and the runner is idle.
+
+        Stale node statuses (e.g. leftover RUN on the DAG) and LSF registry
+        entries must not permanently disable Sync — those are handled at click
+        time with a warning if needed.
+        """
         if self.sync_source is None:
             return False
         if self.is_running:
             return False
-        if self._has_rerun_blocking_status():
-            return False
         if self.kill_monitor.targets:
-            return False
-        if self.job_registry.alive_entries():
             return False
         return True
 
@@ -1373,12 +1382,23 @@ class FlowRunnerGUI:
         if not self._can_sync():
             messagebox.showinfo(
                 "Sync",
-                "Cannot sync while a job is running, queued as RUN, or being killed.",
+                "Cannot sync while a flow is running or jobs are being killed.",
                 parent=parent,
             )
             return
         if self.sync_source is None:
             return
+
+        alive = self.job_registry.alive_entries()
+        if alive:
+            if not messagebox.askyesno(
+                "Sync",
+                f"{len(alive)} LSF job(s) still appear to be running.\n"
+                "Sync will replace the flow on the DAG anyway.\n\n"
+                "Continue?",
+                parent=parent,
+            ):
+                return
 
         try:
             flow = self.sync_source.get_flow_dict()
@@ -1520,7 +1540,25 @@ class FlowRunnerGUI:
         self._fill_log_widget(self.flow_log_text, self.flow_log_messages)
         self._fill_log_widget(self.job_log_text, self.job_log_messages)
 
-    def _clear_logs(self):
+    def _reset_flow(self):
+        """Clear logs, drop LSF tracking, and reset every job to waiting."""
+        parent = self.window
+        if self.is_running:
+            messagebox.showinfo(
+                "Reset Flow",
+                "Cannot reset while a flow is running. Stop it first.",
+                parent=parent,
+            )
+            return
+        if self.kill_monitor.targets:
+            messagebox.showinfo(
+                "Reset Flow",
+                "Cannot reset while jobs are being killed. Wait until kill finishes.",
+                parent=parent,
+            )
+            return
+
+        # Keep Clear Logs behavior.
         self.job_tailer.stop()
         self.flow_log_messages = []
         self.job_log_messages = []
@@ -1540,9 +1578,25 @@ class FlowRunnerGUI:
             w.config(state=tk.NORMAL)
             w.delete(1.0, tk.END)
             w.config(state=tk.DISABLED)
+
+        # Forget LSF submissions / kill state so Stop no longer tracks old jobs.
+        self.job_registry.clear()
+        self.kill_monitor.clear()
         self.current_lsf_name = ""
+        self.completed_jobs = 0
+
+        # All DAG nodes back to waiting (pending).
+        if self.graph_model:
+            self.graph_canvas.reset()
+            self.total_jobs = len(self.graph_model.nodes)
+        self._refresh_job_selector()
+        self._update_action_buttons()
         self._update_status("Ready", COLORS["done"])
-        self._log_callback(f"Logs cleared, deleted {deleted} files", "INFO")
+        self._log_callback(
+            f"Flow reset: job statuses cleared, LSF tracking dropped, "
+            f"deleted {deleted} log file(s)",
+            "INFO",
+        )
 
     def _on_job_selected(self, _event=None):
         if not self.graph_model:

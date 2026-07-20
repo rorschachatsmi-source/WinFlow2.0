@@ -530,7 +530,7 @@ The `example_flow/` directory contains a minimal demo pipeline (validation → p
 
 Log directories are configurable via `runner.job_log_dir` and `runner.session_log_dir` in `config.json`.
 
-The runner GUI **Clear Logs** button removes files under both log directories.
+The runner GUI **Reset Flow** button clears log files under both log directories, resets every job on the DAG to waiting, and drops local LSF tracking (registry / kill monitor). It does not send ``bkill``.
 
 ## GUI controls
 

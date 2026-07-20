@@ -169,6 +169,28 @@ class TestFlowDocument(unittest.TestCase):
 
         self.assertEqual([s["name"] for s in loaded["stages"]], ["earlier", "later"])
 
+    def test_export_renames_duplicate_stage_names(self):
+        """a -> b -> a -> d becomes a -> b -> a_2 -> d so job keys stay unique."""
+        doc = FlowDocument(
+            flow_name="demo",
+            poll_interval=10,
+            stages=[
+                make_stage("a", [make_task("t", [make_job("j1", "c", [], [], "q", 1)])]),
+                make_stage("b", [make_task("t", [make_job("j2", "c", [], [], "q", 1)])]),
+                make_stage("a", [make_task("t", [make_job("j3", "c", [], [], "q", 1)])]),
+                make_stage("d", [make_task("t", [make_job("j4", "c", [], [], "q", 1)])]),
+            ],
+        )
+        doc.positions[_job_key("a", "t", "j1")] = (50.0, 50.0)
+        doc.positions[_job_key("b", "t", "j2")] = (150.0, 50.0)
+        doc.positions[_job_key("a", "t", "j3")] = (250.0, 50.0)
+        doc.positions[_job_key("d", "t", "j4")] = (350.0, 50.0)
+
+        flow = document_to_flow(doc)
+        self.assertEqual([s["name"] for s in flow["stages"]], ["a", "b", "a_2", "d"])
+        # Positions follow renamed keys
+        self.assertIn(_job_key("a_2", "t", "j3"), doc.positions)
+
 
 if __name__ == "__main__":
     unittest.main()

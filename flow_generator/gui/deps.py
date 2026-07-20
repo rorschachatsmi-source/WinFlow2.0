@@ -204,6 +204,9 @@ def place_parent_before_child(
         task["jobs"].insert(0, job)
         new_parent_key = _job_key(child_stage, child_task_name, job["name"])
         document._relocate_key(parent_key, new_parent_key)
+        child_pos = document.positions.get(child_key)
+        if child_pos is not None:
+            document.positions[new_parent_key] = (child_pos[0] - 40.0, child_pos[1] - 48.0)
         _rewrite_dummy_paths_for_key(document, parent_key, new_parent_key)
         notes.append(f"moved {parent_job['name']} into stage {child_stage!r} (follow child)")
         return new_parent_key, child_key, notes
@@ -212,6 +215,10 @@ def place_parent_before_child(
     dest_task["jobs"].insert(child_idx, job)
     new_parent_key = _job_key(stage["name"], dest_task["name"], job["name"])
     document._relocate_key(parent_key, new_parent_key)
+    # Keep parent visually with the child so canvas stage order stays coherent.
+    child_pos = document.positions.get(child_key)
+    if child_pos is not None:
+        document.positions[new_parent_key] = (child_pos[0] - 40.0, child_pos[1] - 48.0)
     if new_parent_key != parent_key:
         _rewrite_dummy_paths_for_key(document, parent_key, new_parent_key)
         if parent_stage != stage["name"]:

@@ -185,6 +185,22 @@ class TestPVFlowBuilder(unittest.TestCase):
         )
         self.assertEqual(lvs_job["outputs"], ["lvs.rep"])
 
+    def test_drc_lvs_link_top_out_when_oasii_off(self):
+        context = BuildContext(
+            settings=base_settings(USE_OASII="0", FLAG_DRCBE="1", FLAG_LVS="1"),
+            blocks=[],
+        )
+        flow = PVFlowBuilder.build(context)
+        stream_out = next(s for s in flow["stages"] if s["name"] == "streamOut_TOP")
+        job_names = [j["name"] for t in stream_out["tasks"] for j in t["jobs"]]
+        self.assertNotIn("gds2oas", job_names)
+        post_stage = flow["stages"][-1]
+        drc = next(t for t in post_stage["tasks"] if t["name"] == "DRC_BE")["jobs"][0]
+        lvs = next(t for t in post_stage["tasks"] if t["name"] == "LVS")["jobs"][0]
+        self.assertEqual(drc["inputs"], ["../GDS/sm8466_top.gds.gz"])
+        self.assertIn("../GDS/sm8466_top.gds.gz", lvs["inputs"])
+        self.assertNotIn(".oas", "".join(lvs["inputs"]))
+
     def test_lvs_omitted_when_flag_off(self):
         context = BuildContext(settings=base_settings(FLAG_DRCBE="1"), blocks=[])
         flow = PVFlowBuilder.build(context)

@@ -124,6 +124,29 @@ class FlowValidator:
             self.logger.error("'stages' must be a list")
             return False
 
+        # Job identity is stage/task/job — duplicate stage names collide in the
+        # runner GUI, DAG edges, and abort later stages on a false failure.
+        seen = set()
+        dupes = []
+        for stage in config["stages"]:
+            if not isinstance(stage, dict):
+                continue
+            name = stage.get("name")
+            if not name:
+                continue
+            if name in seen:
+                dupes.append(name)
+            else:
+                seen.add(name)
+        if dupes:
+            uniq = ", ".join(repr(n) for n in dict.fromkeys(dupes))
+            self.logger.error(
+                f"Duplicate stage name(s): {uniq}. "
+                "Re-export/Sync from Generator (auto-renames to name_2), "
+                "or rename stages so each name appears once."
+            )
+            return False
+
         return True
 
     def validate_paths(self, paths: List[str], path_type: str = "input"):
