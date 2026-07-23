@@ -11,6 +11,7 @@
     "kill_poll_ms": 15000,
     "kill_max_retries": 4,
     "log_tail_interval_sec": 0.5,
+    "job_log_view_lines": 100,
     "thread_join_timeout_sec": 1.0,
     "log_viewer": "gvim",
     "auto_load_delay_ms": 150
@@ -54,25 +55,113 @@
       "bzgdsout_top": "bzgdsout_top.sh",
       "gds2oas": "gds2oas.sh",
       "laker_text": "laker_text.sh",
-      "run_drc": "run_drc",
+      "run_drc": "run_drc.sh",
       "spi": "run_spi.sh",
       "rcxt": "run_rcxt.sh",
       "lvs": "run_lvs.sh"
     },
-    "files": {
-      "apr_gds": "apr.gds.gz",
-      "laker_top_lib_tcl": "laker_topLib.tcl",
-      "sub_dmexcl_calibre": "sub_dmexcl.calibre",
-      "create_text_tcl": "create_text_from_APRgds.tcl",
-      "drc_report": "DRC.rep",
-      "spi_input_spi": "{top}.spi",
-      "spi_input_netlist": "netlist.pg.v.gz",
-      "spi_output": "{top}.cdl",
-      "rcxt_output": "flag_starrc_done",
-      "lvs_hcell": "hcell",
-      "lvs_calibre": "lvs.calibre",
-      "lvs_layout_spi": "layout.spi",
-      "lvs_report": "lvs.rep"
+    "jobs": {
+      "sub_laker": {
+        "inputs": ["{workdir}/GDS/{block}.gds.gz"],
+        "outputs": ["{laker_dir}/{block}.blitz++"]
+      },
+      "sub_calibre": {
+        "inputs": ["{laker_dir}/sub_dmexcl.calibre"],
+        "outputs": ["{laker_dir}/{block}_dummy.gds.gz"]
+      },
+      "sub_laker_dummy": {
+        "inputs": ["{laker_dir}/{block}_dummy.gds.gz"],
+        "outputs": ["{laker_dir}/{block}.blitz++"]
+      },
+      "laker_In": {
+        "inputs": ["{data_dir}/apr.gds.gz"],
+        "outputs": ["{laker_dir}/{top}_APR.blitz++"]
+      },
+      "laker_In_from_stream_out": {
+        "inputs": ["{gds_dir}/{top}_FULL.gds.gz"],
+        "outputs": ["{laker_dir}/{top}_APR.blitz++"]
+      },
+      "laker_pre_In": {
+        "inputs": ["{data_dir}/apr.gds.gz"],
+        "outputs": ["{laker_dir}/{top}_APR.blitz++"]
+      },
+      "laker_Out": {
+        "inputs": ["{laker_dir}/{top}_APR.blitz++"],
+        "outputs": ["{gds_dir}/{top}_FULL.gds.gz"]
+      },
+      "SPI": {
+        "inputs": ["{data_dir}/ref.spi", "{data_dir}/netlist.pg.v.gz"],
+        "outputs": ["{spi_dir}/{top}.cdl"]
+      },
+      "RCXT": {
+        "inputs": ["{gds_dir}/DM.gds"],
+        "outputs": ["flag_starrc_done"]
+      },
+      "LVS": {
+        "inputs": [
+          "{data_dir}/hcell",
+          "{gds_dir}/{final_top}.oas",
+          "{spi_dir}/{top}.cdl"
+        ],
+        "outputs": ["lvs.rep"]
+      },
+      "Calibre_merge": {
+        "inputs": ["{gds_dir}/{top}_FULL.gds.gz"],
+        "outputs": ["{gds_dir}/{tag}.gds"]
+      },
+      "Calibre_merge_gz": {
+        "inputs": ["{gds_dir}/{top}_FULL.gds.gz"],
+        "outputs": ["{gds_dir}/{tag}.gds.gz"]
+      },
+      "laker_merge": {
+        "inputs": ["{gds_dir}/{tag}.gds"],
+        "outputs": ["{laker_dir}/{top}_{tag}.blitz++"]
+      },
+      "laker_text": {
+        "inputs": [
+          "{laker_dir}/{top}_APR.blitz++",
+          "{gds_dir}/{top}_FULL.gds.gz"
+        ],
+        "outputs": ["{laker_dir}/create_text_from_APRgds.tcl"]
+      },
+      "laker_topLib": {
+        "inputs": [
+          "{laker_dir}/{top}_DM.blitz++",
+          "{laker_dir}/create_text_from_APRgds.tcl",
+          "{data_dir}/laker_topLib.tcl"
+        ],
+        "outputs": ["{laker_dir}/{final_top}_LIB.blitz++"]
+      },
+      "top_Out": {
+        "inputs": [
+          "{laker_dir}/{final_top}_LIB.blitz++",
+          "{gds_dir}/{top}_FULL.gds.gz"
+        ],
+        "outputs": ["{gds_dir}/{final_top}.gds.gz"]
+      },
+      "gds2oas": {
+        "inputs": ["{gds_dir}/{final_top}.gds.gz"],
+        "outputs": ["{gds_dir}/{final_top}.oas"]
+      },
+      "DRC": {
+        "inputs": ["{gds_dir}/{final_top}.oas"],
+        "outputs": ["DRC.rep"]
+      },
+      "DRC_BE": {
+        "inputs": ["{gds_dir}/{final_top}.oas"],
+        "outputs": ["DRC.rep"]
+      },
+      "DRC_FE": {
+        "inputs": ["{gds_dir}/{final_top}.oas"],
+        "outputs": ["DRC.rep"]
+      },
+      "merge_topLib_extras": {
+        "inputs": [
+          "{laker_dir}/create_text_from_APRgds.tcl",
+          "{data_dir}/laker_topLib.tcl"
+        ],
+        "outputs": []
+      }
     },
     "merge_flags": [
       {"setting_key": "FLAG_DMF", "script": "dmf", "tag": "DM"},
@@ -84,8 +173,21 @@
     "flow_name": "APR",
     "stage_name": "APR",
     "task_name": "apr",
-    "run_stage_template": "./run_stage {job_name}",
-    "output_template": "{job_name}/DB/{job_name}.enc.dat",
+    "default_job": {
+      "command": "./run_stage {job_name}",
+      "inputs": ["{prev_output}"],
+      "outputs": ["{job_name}/DB/{job_name}.enc.dat"]
+    },
+    "jobs": {
+      "01_floorplan": {
+        "inputs": []
+      },
+      "02_prects_opt": {},
+      "03_cts_concurrent": {},
+      "04_postcts_opt": {},
+      "05_route.tcl": {},
+      "06_postroute_opt": {}
+    },
     "stages_before_current": [
       "01_floorplan",
       "02_prects_opt",

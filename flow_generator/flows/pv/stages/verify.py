@@ -1,4 +1,4 @@
-"""PV post-gds2oas verification stage (DRC / LVS)."""
+"""PV post-streamOut_TOP verification stage (DRC / LVS)."""
 
 from __future__ import annotations
 
@@ -6,11 +6,7 @@ from typing import Dict, List, Optional
 
 from flow_generator.core.models import Stage, Task, make_job, make_stage, make_task
 from flow_generator.flows.pv.config import PVConfig, flag_enabled
-from flow_generator.flows.pv.stages.spi_rcxt_lvs import lvs_task
-
-
-def _oas_input(config: PVConfig) -> str:
-    return f"{config.paths.gds_dir}/{config.final_top}.oas"
+from flow_generator.flows.pv.stages.spi_rcxt_lvs import lvs_task, _rewrite_layout_inputs
 
 
 def _use_drc_stage_name(settings: Dict[str, str]) -> bool:
@@ -20,50 +16,17 @@ def _use_drc_stage_name(settings: Dict[str, str]) -> bool:
     )
 
 
-def _generic_drc_task(config: PVConfig) -> Task:
-    paths = config.paths
+def _drc_task(config: PVConfig, name: str, settings: Dict[str, str]) -> Task:
+    inputs, outputs = config.job_io(name)
+    inputs = _rewrite_layout_inputs(inputs, config, settings)
     return make_task(
-        "DRC",
+        name,
         [
             make_job(
-                "DRC",
-                f"{paths.flow_dir}/{config.scripts.run_drc} DRC",
-                [_oas_input(config)],
-                [config.files.drc_report],
-                config.queue,
-                config.cpu,
-            )
-        ],
-    )
-
-
-def _drc_be_task(config: PVConfig) -> Task:
-    paths = config.paths
-    return make_task(
-        "DRC_BE",
-        [
-            make_job(
-                "DRC_BE",
-                f"{paths.flow_dir}/{config.scripts.run_drc} DRC_BE",
-                [_oas_input(config)],
-                [config.files.drc_report],
-                config.queue,
-                config.cpu,
-            )
-        ],
-    )
-
-
-def _drc_fe_task(config: PVConfig) -> Task:
-    paths = config.paths
-    return make_task(
-        "DRC_FE",
-        [
-            make_job(
-                "DRC_FE",
-                f"{paths.flow_dir}/{config.scripts.run_drc} DRC_FE",
-                [_oas_input(config)],
-                [config.files.drc_report],
+                name,
+                f"{config.paths.flow_dir}/{config.scripts.run_drc} {name}",
+                inputs,
+                outputs,
                 config.queue,
                 config.cpu,
             )
@@ -75,21 +38,21 @@ def build_post_gds2oas_stage(
     settings: Dict[str, str],
     config: PVConfig,
 ) -> Optional[Stage]:
-    """Build DRC/Verify stage after gds2oas with parallel DRC and LVS tasks."""
+    """Build DRC/Verify stage after streamOut_TOP (after gds2oas or *_Out)."""
     tasks: List[Task] = []
     use_drc_stage = _use_drc_stage_name(settings)
 
     if use_drc_stage:
-        tasks.append(_generic_drc_task(config))
+        tasks.append(_drc_task(config, "DRC", settings))
 
     if flag_enabled(settings, "FLAG_DRCBE"):
-        tasks.append(_drc_be_task(config))
+        tasks.append(_drc_task(config, "DRC_BE", settings))
 
     if flag_enabled(settings, "FLAG_DRCFE"):
-        tasks.append(_drc_fe_task(config))
+        tasks.append(_drc_task(config, "DRC_FE", settings))
 
     if flag_enabled(settings, "FLAG_LVS"):
-        tasks.append(lvs_task(config))
+        tasks.append(lvs_task(config, settings))
 
     if not tasks:
         return None

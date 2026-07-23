@@ -14,7 +14,6 @@ def build_merge_stage(
     config: PVConfig,
 ) -> Tuple[Stage, List[str]]:
     paths = config.paths
-    top = config.top
     merge_tasks: List[Task] = []
     laker_outputs: List[str] = []
 
@@ -24,12 +23,12 @@ def build_merge_stage(
 
         script = flag_cfg.script
         tag = flag_cfg.tag
-        if tag == "DMEXCL":
-            outputs = [f"{paths.gds_dir}/{tag}.gds.gz"]
-        else:
-            outputs = [f"{paths.gds_dir}/{tag}.gds"]
-
-        laker_outputs.append(f"{paths.laker_dir}/{top}_{tag}.blitz++")
+        calibre_key = "Calibre_merge_gz" if tag == "DMEXCL" else "Calibre_merge"
+        cal_in, cal_out = config.job_io(calibre_key, tag=tag)
+        # laker_merge inputs follow calibre outputs (wire by path, not template).
+        _, lak_out = config.job_io("laker_merge", tag=tag)
+        blitz = lak_out[0]
+        laker_outputs.append(blitz)
         merge_tasks.append(
             make_task(
                 tag,
@@ -37,16 +36,16 @@ def build_merge_stage(
                     make_job(
                         f"Calibre_{script}",
                         f"{paths.flow_dir}/{script}.sh",
-                        [f"{paths.gds_dir}/{top}_FULL.gds.gz"],
-                        outputs,
+                        cal_in,
+                        cal_out,
                         config.queue,
                         config.cpu,
                     ),
                     make_job(
                         f"laker_{script}",
                         f"{paths.flow_dir}/bzgdsin_{script}.sh",
-                        outputs,
-                        [f"{paths.laker_dir}/{top}_{tag}.blitz++"],
+                        cal_out,
+                        [blitz],
                         config.queue,
                         config.cpu,
                     ),
@@ -54,6 +53,7 @@ def build_merge_stage(
             )
         )
 
+    text_in, text_out = config.job_io("laker_text")
     merge_tasks.append(
         make_task(
             "laker_text",
@@ -61,18 +61,16 @@ def build_merge_stage(
                 make_job(
                     "laker_text",
                     f"{paths.flow_dir}/{config.scripts.laker_text}",
-                    [
-                        f"{paths.laker_dir}/{top}_APR.blitz++",
-                        f"{paths.gds_dir}/{top}_FULL.gds.gz",
-                    ],
-                    [f"{paths.laker_dir}/{config.files.create_text_tcl}"],
+                    text_in,
+                    text_out,
                     config.queue,
                     config.cpu,
                 )
             ],
         )
     )
-    laker_outputs.append(f"{paths.laker_dir}/{config.files.create_text_tcl}")
-    laker_outputs.append(f"{paths.data_dir}/{config.files.laker_top_lib_tcl}")
+    laker_outputs.extend(text_out)
+    extras_in, _ = config.job_io("merge_topLib_extras")
+    laker_outputs.extend(extras_in)
 
     return make_stage("Merge", merge_tasks), laker_outputs

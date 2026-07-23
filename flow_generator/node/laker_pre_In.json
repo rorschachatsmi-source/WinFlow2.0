@@ -1,0 +1,28 @@
+{
+  "flow_name": "PV",
+  "poll_interval": 20,
+  "stages": [
+    {
+      "name": "stage_1",
+      "tasks": [
+        {
+          "name": "task_1",
+          "jobs": [
+            {
+              "name": "laker_pre_In",
+              "command": "../flow/pre_bzgdsin_apr.sh",
+              "queue": "tpdsd1",
+              "cpu": 4,
+              "inputs": [
+                "../DATA/apr.gds.gz"
+              ],
+              "outputs": [
+                "../LakerBZ/TOP_MODULE_APR.blitz++"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

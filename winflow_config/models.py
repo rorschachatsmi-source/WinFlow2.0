@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 @dataclass(frozen=True)
@@ -19,6 +19,7 @@ class RunnerConfig:
     kill_poll_ms: int = 15000
     kill_max_retries: int = 4
     log_tail_interval_sec: float = 0.5
+    job_log_view_lines: int = 100
     thread_join_timeout_sec: float = 1.0
     log_viewer: str = "gvim"
     auto_load_delay_ms: int = 150
@@ -74,20 +75,151 @@ class PVScriptsConfig:
 
 
 @dataclass(frozen=True)
-class PVFilesConfig:
-    apr_gds: str = "apr.gds.gz"
-    laker_top_lib_tcl: str = "laker_topLib.tcl"
-    sub_dmexcl_calibre: str = "sub_dmexcl.calibre"
-    create_text_tcl: str = "create_text_from_APRgds.tcl"
-    drc_report: str = "DRC.rep"
-    spi_input_spi: str = "{top}.spi"
-    spi_input_netlist: str = "netlist.pg.v.gz"
-    spi_output: str = "{top}.cdl"
-    rcxt_output: str = "flag_starrc_done"
-    lvs_hcell: str = "hcell"
-    lvs_calibre: str = "lvs.calibre"
-    lvs_layout_spi: str = "layout.spi"
-    lvs_report: str = "lvs.rep"
+class JobIOConfig:
+    """Per-job I/O (and optional command) path templates.
+
+    ``None`` means “unset” so APR can override only some fields against ``default_job``.
+    """
+
+    inputs: Optional[Tuple[str, ...]] = None
+    outputs: Optional[Tuple[str, ...]] = None
+    command: Optional[str] = None
+
+    @classmethod
+    def from_mapping(cls, data: Dict[str, Any]) -> "JobIOConfig":
+        return cls(
+            inputs=tuple(data["inputs"]) if "inputs" in data else None,
+            outputs=tuple(data["outputs"]) if "outputs" in data else None,
+            command=data["command"] if "command" in data else None,
+        )
+
+    def resolved(
+        self,
+        default: Optional["JobIOConfig"] = None,
+    ) -> Tuple[Tuple[str, ...], Tuple[str, ...], str]:
+        """Return concrete (inputs, outputs, command), filling gaps from ``default``."""
+        base = default or JobIOConfig(inputs=(), outputs=(), command="")
+        inputs = self.inputs if self.inputs is not None else (base.inputs or ())
+        outputs = self.outputs if self.outputs is not None else (base.outputs or ())
+        command = self.command if self.command is not None else (base.command or "")
+        return inputs, outputs, command
+
+    def merge_over(self, other: "JobIOConfig") -> "JobIOConfig":
+        """Overlay ``other`` fields that are set (not ``None``)."""
+        return JobIOConfig(
+            inputs=other.inputs if other.inputs is not None else self.inputs,
+            outputs=other.outputs if other.outputs is not None else self.outputs,
+            command=other.command if other.command is not None else self.command,
+        )
+
+
+def _default_pv_jobs() -> Dict[str, JobIOConfig]:
+    return {
+        "sub_laker": JobIOConfig(
+            inputs=("{workdir}/GDS/{block}.gds.gz",),
+            outputs=("{laker_dir}/{block}.blitz++",),
+        ),
+        "sub_calibre": JobIOConfig(
+            inputs=("{laker_dir}/sub_dmexcl.calibre",),
+            outputs=("{laker_dir}/{block}_dummy.gds.gz",),
+        ),
+        "sub_laker_dummy": JobIOConfig(
+            inputs=("{laker_dir}/{block}_dummy.gds.gz",),
+            outputs=("{laker_dir}/{block}.blitz++",),
+        ),
+        "laker_In": JobIOConfig(
+            inputs=("{data_dir}/apr.gds.gz",),
+            outputs=("{laker_dir}/{top}_APR.blitz++",),
+        ),
+        "laker_In_from_stream_out": JobIOConfig(
+            inputs=("{gds_dir}/{top}_FULL.gds.gz",),
+            outputs=("{laker_dir}/{top}_APR.blitz++",),
+        ),
+        "laker_pre_In": JobIOConfig(
+            inputs=("{data_dir}/apr.gds.gz",),
+            outputs=("{laker_dir}/{top}_APR.blitz++",),
+        ),
+        "laker_Out": JobIOConfig(
+            inputs=("{laker_dir}/{top}_APR.blitz++",),
+            outputs=("{gds_dir}/{top}_FULL.gds.gz",),
+        ),
+        "SPI": JobIOConfig(
+            inputs=("{top}.spi", "{data_dir}/netlist.pg.v.gz"),
+            outputs=("{spi_dir}/{top}.cdl",),
+        ),
+        "RCXT": JobIOConfig(
+            inputs=("{gds_dir}/DM.gds",),
+            outputs=("flag_starrc_done",),
+        ),
+        "LVS": JobIOConfig(
+            inputs=(
+                "hcell",
+                "lvs.calibre",
+                "layout.spi",
+                "{gds_dir}/{final_top}.oas",
+                "{spi_dir}/{top}.cdl",
+            ),
+            outputs=("lvs.rep",),
+        ),
+        "Calibre_merge": JobIOConfig(
+            inputs=("{gds_dir}/{top}_FULL.gds.gz",),
+            outputs=("{gds_dir}/{tag}.gds",),
+        ),
+        "Calibre_merge_gz": JobIOConfig(
+            inputs=("{gds_dir}/{top}_FULL.gds.gz",),
+            outputs=("{gds_dir}/{tag}.gds.gz",),
+        ),
+        "laker_merge": JobIOConfig(
+            inputs=("{gds_dir}/{tag}.gds",),
+            outputs=("{laker_dir}/{top}_{tag}.blitz++",),
+        ),
+        "laker_text": JobIOConfig(
+            inputs=(
+                "{laker_dir}/{top}_APR.blitz++",
+                "{gds_dir}/{top}_FULL.gds.gz",
+            ),
+            outputs=("{laker_dir}/create_text_from_APRgds.tcl",),
+        ),
+        "laker_topLib": JobIOConfig(
+            inputs=(
+                "{laker_dir}/{top}_DM.blitz++",
+                "{laker_dir}/create_text_from_APRgds.tcl",
+                "{data_dir}/laker_topLib.tcl",
+            ),
+            outputs=("{laker_dir}/{final_top}_LIB.blitz++",),
+        ),
+        "top_Out": JobIOConfig(
+            inputs=(
+                "{laker_dir}/{final_top}_LIB.blitz++",
+                "{gds_dir}/{top}_FULL.gds.gz",
+            ),
+            outputs=("{gds_dir}/{final_top}.gds.gz",),
+        ),
+        "gds2oas": JobIOConfig(
+            inputs=("{gds_dir}/{final_top}.gds.gz",),
+            outputs=("{gds_dir}/{final_top}.oas",),
+        ),
+        "DRC": JobIOConfig(
+            inputs=("{gds_dir}/{final_top}.oas",),
+            outputs=("DRC.rep",),
+        ),
+        "DRC_BE": JobIOConfig(
+            inputs=("{gds_dir}/{final_top}.oas",),
+            outputs=("DRC.rep",),
+        ),
+        "DRC_FE": JobIOConfig(
+            inputs=("{gds_dir}/{final_top}.oas",),
+            outputs=("DRC.rep",),
+        ),
+        # Static extras appended to merge → topLib input list
+        "merge_topLib_extras": JobIOConfig(
+            inputs=(
+                "{laker_dir}/create_text_from_APRgds.tcl",
+                "{data_dir}/laker_topLib.tcl",
+            ),
+            outputs=(),
+        ),
+    }
 
 
 @dataclass(frozen=True)
@@ -103,7 +235,7 @@ class PVFlowConfig:
     required_settings: Tuple[str, ...] = ("TOP_MODULE", "MACHINE_QUEUE", "MACHINE_CPU")
     paths: PVPathsConfig = field(default_factory=PVPathsConfig)
     scripts: PVScriptsConfig = field(default_factory=PVScriptsConfig)
-    files: PVFilesConfig = field(default_factory=PVFilesConfig)
+    jobs: Dict[str, JobIOConfig] = field(default_factory=_default_pv_jobs)
     merge_flags: Tuple[PVMergeFlagConfig, ...] = (
         PVMergeFlagConfig("FLAG_DMF", "dmf", "DM"),
         PVMergeFlagConfig("FLAG_DOD", "dod", "DODPO"),
@@ -111,13 +243,27 @@ class PVFlowConfig:
     )
 
 
+def _default_apr_job() -> JobIOConfig:
+    return JobIOConfig(
+        inputs=("{prev_output}",),
+        outputs=("{job_name}/DB/{job_name}.enc.dat",),
+        command="./run_stage {job_name}",
+    )
+
+
+def _default_apr_jobs() -> Dict[str, JobIOConfig]:
+    return {
+        "01_floorplan": JobIOConfig(inputs=()),
+    }
+
+
 @dataclass(frozen=True)
 class APRConfig:
     flow_name: str = "APR"
     stage_name: str = "APR"
     task_name: str = "apr"
-    run_stage_template: str = "./run_stage {job_name}"
-    output_template: str = "{job_name}/DB/{job_name}.enc.dat"
+    default_job: JobIOConfig = field(default_factory=_default_apr_job)
+    jobs: Dict[str, JobIOConfig] = field(default_factory=_default_apr_jobs)
     stages_before_current: Tuple[str, ...] = (
         "01_floorplan",
         "02_prects_opt",

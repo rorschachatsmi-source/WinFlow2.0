@@ -1,0 +1,28 @@
+{
+  "flow_name": "PV",
+  "poll_interval": 20,
+  "stages": [
+    {
+      "name": "stage_1",
+      "tasks": [
+        {
+          "name": "task_1",
+          "jobs": [
+            {
+              "name": "Calibre_dex",
+              "command": "../flow/dex.sh",
+              "queue": "tpdsd1",
+              "cpu": 4,
+              "inputs": [
+                "../GDS/TOP_MODULE_FULL.gds.gz"
+              ],
+              "outputs": [
+                "../GDS/DMEXCL.gds.gz"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

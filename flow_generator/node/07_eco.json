@@ -1,0 +1,29 @@
+{
+  "flow_name": "ECO",
+  "poll_interval": 20,
+  "stages": [
+    {
+      "name": "eco",
+      "tasks": [
+        {
+          "name": "eco",
+          "jobs": [
+            {
+              "name": "eco",
+              "command": "./run_stage 07_eco",
+              "queue": "tpdsd1",
+              "cpu": 4,
+              "inputs": [],
+              "outputs": [
+                "07_eco/DB/07_eco.enc.dat",
+                "07_eco/EXPORT/$module_name.def.gz",
+                "07_eco/EXPORT/$module_name_APR.gds.gz",
+                "07_eco/EXPORT/$module_name.v.gz"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

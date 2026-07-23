@@ -1,0 +1,28 @@
+{
+  "flow_name": "PV",
+  "poll_interval": 20,
+  "stages": [
+    {
+      "name": "stage_1",
+      "tasks": [
+        {
+          "name": "task_1",
+          "jobs": [
+            {
+              "name": "laker_dmf",
+              "command": "../flow/bzgdsin_dmf.sh",
+              "queue": "tpdsd1",
+              "cpu": 4,
+              "inputs": [
+                "../GDS/DM.gds"
+              ],
+              "outputs": [
+                "../LakerBZ/TOP_MODULE_DM.blitz++"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

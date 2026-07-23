@@ -6,8 +6,11 @@ import unittest
 from pathlib import Path
 
 from flow_generator.core.models import make_flow, make_job, make_stage, make_task
+from flow_generator.core.io import write_flow
 from flow_generator.gui.document import (
+    FlowDocument,
     TemplateOptions,
+    _job_key,
     apply_template,
     blank_template,
     document_to_flow,
@@ -101,6 +104,92 @@ class TestFlowDocument(unittest.TestCase):
             loaded = json.loads(out.read_text(encoding="utf-8"))
         self.assertEqual(loaded["flow_name"], flow["flow_name"])
         self.assertIn("stages", loaded)
+
+    def test_export_orders_stages_left_to_right(self):
+        """Canvas X order wins over list append order (renames / new stages)."""
+        doc = FlowDocument(
+            flow_name="demo",
+            poll_interval=10,
+            stages=[
+                make_stage("A", [make_task("t", [make_job("a", "c", [], [], "q", 1)])]),
+                make_stage("B", [make_task("t", [make_job("b", "c", [], [], "q", 1)])]),
+                make_stage("C", [make_task("t", [make_job("c", "c", [], [], "q", 1)])]),
+            ],
+        )
+        doc.positions[_job_key("A", "t", "a")] = (200.0, 50.0)
+        doc.positions[_job_key("B", "t", "b")] = (400.0, 50.0)
+        doc.positions[_job_key("C", "t", "c")] = (50.0, 50.0)
+
+        flow = document_to_flow(doc)
+        self.assertEqual([s["name"] for s in flow["stages"]], ["C", "A", "B"])
+
+    def test_export_orders_jobs_top_to_bottom(self):
+        doc = FlowDocument(
+            flow_name="demo",
+            poll_interval=10,
+            stages=[
+                make_stage(
+                    "S",
+                    [
+                        make_task(
+                            "t",
+                            [
+                                make_job("lower", "c", [], [], "q", 1),
+                                make_job("upper", "c", [], [], "q", 1),
+                            ],
+                        )
+                    ],
+                )
+            ],
+        )
+        doc.positions[_job_key("S", "t", "lower")] = (50.0, 200.0)
+        doc.positions[_job_key("S", "t", "upper")] = (50.0, 40.0)
+
+        flow = document_to_flow(doc)
+        names = [j["name"] for j in flow["stages"][0]["tasks"][0]["jobs"]]
+        self.assertEqual(names, ["upper", "lower"])
+
+    def test_sync_write_roundtrip_preserves_canvas_stage_order(self):
+        """Mirrors Runner Sync: document_to_flow -> write_flow -> re-read."""
+        doc = FlowDocument(
+            flow_name="demo",
+            poll_interval=10,
+            stages=[
+                make_stage("later", [make_task("t", [make_job("x", "c", [], [], "q", 1)])]),
+                make_stage("earlier", [make_task("t", [make_job("y", "c", [], [], "q", 1)])]),
+            ],
+        )
+        doc.positions[_job_key("later", "t", "x")] = (300.0, 50.0)
+        doc.positions[_job_key("earlier", "t", "y")] = (80.0, 50.0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "flow.json"
+            write_flow(document_to_flow(doc), out)
+            loaded = json.loads(out.read_text(encoding="utf-8"))
+
+        self.assertEqual([s["name"] for s in loaded["stages"]], ["earlier", "later"])
+
+    def test_export_renames_duplicate_stage_names(self):
+        """a -> b -> a -> d becomes a -> b -> a_2 -> d so job keys stay unique."""
+        doc = FlowDocument(
+            flow_name="demo",
+            poll_interval=10,
+            stages=[
+                make_stage("a", [make_task("t", [make_job("j1", "c", [], [], "q", 1)])]),
+                make_stage("b", [make_task("t", [make_job("j2", "c", [], [], "q", 1)])]),
+                make_stage("a", [make_task("t", [make_job("j3", "c", [], [], "q", 1)])]),
+                make_stage("d", [make_task("t", [make_job("j4", "c", [], [], "q", 1)])]),
+            ],
+        )
+        doc.positions[_job_key("a", "t", "j1")] = (50.0, 50.0)
+        doc.positions[_job_key("b", "t", "j2")] = (150.0, 50.0)
+        doc.positions[_job_key("a", "t", "j3")] = (250.0, 50.0)
+        doc.positions[_job_key("d", "t", "j4")] = (350.0, 50.0)
+
+        flow = document_to_flow(doc)
+        self.assertEqual([s["name"] for s in flow["stages"]], ["a", "b", "a_2", "d"])
+        # Positions follow renamed keys
+        self.assertIn(_job_key("a_2", "t", "j3"), doc.positions)
 
 
 if __name__ == "__main__":

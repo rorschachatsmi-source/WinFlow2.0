@@ -1,0 +1,29 @@
+{
+  "flow_name": "PV",
+  "poll_interval": 20,
+  "stages": [
+    {
+      "name": "stage_1",
+      "tasks": [
+        {
+          "name": "task_1",
+          "jobs": [
+            {
+              "name": "SPI",
+              "command": "../flow/run_spi.sh",
+              "queue": "tpdsd1",
+              "cpu": 4,
+              "inputs": [
+                "TOP_MODULE.spi",
+                "../DATA/netlist.pg.v.gz"
+              ],
+              "outputs": [
+                "../spi/TOP_MODULE.cdl"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

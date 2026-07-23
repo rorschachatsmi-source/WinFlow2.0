@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from flow_generator.core.builder import FlowBuilder
 from flow_generator.core.context import BuildContext
 from flow_generator.core.models import Flow, Job, Stage, make_flow, make_job, make_stage, make_task
 from flow_generator.core.registry import register
 from winflow_config import get_config
+from winflow_config.models import JobIOConfig
 
 
 def format_apr_suffix(prefix: str) -> str:
@@ -21,19 +22,60 @@ def apr_job_name(stage_base: str, prefix: str) -> str:
     return f"{stage_base}{format_apr_suffix(prefix)}"
 
 
-def apr_job_output(job_name: str) -> str:
-    template = get_config().apr.output_template
-    return template.format(job_name=job_name)
+def apr_stage_bases(is_current: bool = False) -> List[str]:
+    apr_cfg = get_config().apr
+    names = list(apr_cfg.stages_before_current)
+    if is_current:
+        names.append(apr_cfg.current_stage)
+    names.extend(apr_cfg.stages_after_current)
+    return names
 
 
 def apr_job_names(prefix: str = "", is_current: bool = False) -> List[str]:
-    apr_cfg = get_config().apr
     suffix = format_apr_suffix(prefix)
-    names = [f"{base}{suffix}" for base in apr_cfg.stages_before_current]
-    if is_current:
-        names.append(f"{apr_cfg.current_stage}{suffix}")
-    names.extend(f"{base}{suffix}" for base in apr_cfg.stages_after_current)
-    return names
+    return [f"{base}{suffix}" for base in apr_stage_bases(is_current)]
+
+
+def _resolve_stage_io(stage_base: str) -> Tuple[Tuple[str, ...], Tuple[str, ...], str]:
+    apr_cfg = get_config().apr
+    override = apr_cfg.jobs.get(stage_base, JobIOConfig())
+    merged = apr_cfg.default_job.merge_over(override)
+    return merged.resolved(apr_cfg.default_job)
+
+
+def _expand_apr_paths(
+    templates: Tuple[str, ...],
+    *,
+    job_name: str,
+    prev_output: Optional[str],
+) -> List[str]:
+    paths: List[str] = []
+    for template in templates:
+        if template == "{prev_output}":
+            if prev_output:
+                paths.append(prev_output)
+            continue
+        paths.append(template.format(job_name=job_name, prev_output=prev_output or ""))
+    return paths
+
+
+def apr_job_output(job_name: str, stage_base: Optional[str] = None) -> str:
+    """Return the primary output path for an APR job (first outputs entry)."""
+    if stage_base is None:
+        # Infer base by stripping a trailing _prefix if present — prefer explicit base.
+        apr_cfg = get_config().apr
+        for base in (
+            list(apr_cfg.stages_before_current)
+            + [apr_cfg.current_stage]
+            + list(apr_cfg.stages_after_current)
+        ):
+            if job_name == base or job_name.startswith(base + "_"):
+                stage_base = base
+                break
+        stage_base = stage_base or job_name
+    _inputs, outputs, _command = _resolve_stage_io(stage_base)
+    expanded = _expand_apr_paths(outputs, job_name=job_name, prev_output=None)
+    return expanded[0] if expanded else ""
 
 
 def build_apr_jobs(
@@ -49,20 +91,23 @@ def build_apr_jobs(
     jobs: List[Job] = []
     prev_output: Optional[str] = None
 
-    for name in apr_job_names(prefix, is_current):
-        inputs = [prev_output] if prev_output else []
-        output = apr_job_output(name)
+    for stage_base in apr_stage_bases(is_current):
+        name = apr_job_name(stage_base, prefix)
+        input_tmpls, output_tmpls, command_tmpl = _resolve_stage_io(stage_base)
+        inputs = _expand_apr_paths(input_tmpls, job_name=name, prev_output=prev_output)
+        outputs = _expand_apr_paths(output_tmpls, job_name=name, prev_output=prev_output)
+        command = command_tmpl.format(job_name=name, prev_output=prev_output or "")
         job = make_job(
             name=name,
-            command=apr_cfg.run_stage_template.format(job_name=name),
+            command=command,
             inputs=inputs,
-            outputs=[output],
+            outputs=outputs,
             queue=queue,
             cpu=cpu,
             machine=machine,
         )
         jobs.append(job)
-        prev_output = output
+        prev_output = outputs[0] if outputs else prev_output
 
     return jobs
 

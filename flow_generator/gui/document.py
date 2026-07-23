@@ -48,6 +48,7 @@ class TemplateOptions:
     blocks_path: Optional[Path] = None
     apr_is_current: bool = False
     apr_prefix: str = ""
+    use_oasii: bool = True
 
 
 def _job_key(stage: str, task: str, job_name: str) -> JobKey:
@@ -123,6 +124,10 @@ class FlowDocument:
                 queue="",
                 cpu=get_config().generator.new_job_cpu,
             )
+        else:
+            job = dict(job)
+            job.setdefault("parents", [])
+            job.setdefault("children", [])
         job_key = key or _job_key(stage_name, task_name, job["name"])
 
         stage = self._ensure_stage(stage_name)
@@ -178,6 +183,71 @@ class FlowDocument:
             stage["tasks"] = [task for task in stage["tasks"] if task["jobs"]]
         self.stages = [stage for stage in self.stages if stage["tasks"]]
 
+    def _unique_task_name(self, stage: Stage, base: str) -> str:
+        existing = {task["name"] for task in stage["tasks"]}
+        if base not in existing:
+            return base
+        index = 2
+        while f"{base}_{index}" in existing:
+            index += 1
+        return f"{base}_{index}"
+
+    def _relocate_key(self, old_key: JobKey, new_key: JobKey) -> None:
+        if old_key == new_key:
+            return
+        from flow_graph import key_to_slash, rewrite_relation_key_refs
+
+        rewrite_relation_key_refs(
+            self.stages,
+            key_to_slash(old_key),
+            key_to_slash(new_key),
+        )
+        if old_key in self.positions:
+            self.positions[new_key] = self.positions.pop(old_key)
+        elif new_key not in self.positions:
+            self.positions[new_key] = auto_layout_position(self, new_key)
+
+    def find_job_index(self, key: JobKey) -> Optional[Tuple[Stage, Task, int]]:
+        stage_name, task_name, job_name = key.split("\0")
+        for stage in self.stages:
+            if stage["name"] != stage_name:
+                continue
+            for task in stage["tasks"]:
+                if task["name"] != task_name:
+                    continue
+                for index, job in enumerate(task["jobs"]):
+                    if job["name"] == job_name:
+                        return stage, task, index
+        return None
+
+    def move_job(
+        self,
+        key: JobKey,
+        stage_name: str,
+        task_name: str,
+        index: Optional[int] = None,
+    ) -> JobKey:
+        """Move a job to another stage/task (optionally at index). Returns new key."""
+        located = self.find_job_index(key)
+        if not located:
+            return key
+        _stage, task, old_index = located
+        job = task["jobs"].pop(old_index)
+        self._prune_empty()
+
+        stage = self._ensure_stage(stage_name)
+        dest_task = self._ensure_task(stage, task_name)
+        insert_at = len(dest_task["jobs"]) if index is None else max(0, min(index, len(dest_task["jobs"])))
+        dest_task["jobs"].insert(insert_at, job)
+
+        new_key = _job_key(stage_name, task_name, job["name"])
+        self._relocate_key(key, new_key)
+        if key != new_key:
+            from flow_generator.gui.deps import _rewrite_dummy_paths_for_key
+
+            _rewrite_dummy_paths_for_key(self, key, new_key)
+        return new_key
+
     def update_job(
         self,
         key: JobKey,
@@ -221,19 +291,118 @@ class FlowDocument:
         elif new_key not in self.positions:
             self.positions[new_key] = auto_layout_position(self, new_key)
 
+        if key != new_key:
+            # Keep auto dummy deps (.winflow/deps/...) aligned with the new key
+            # so parent/child file links survive stage/task renames.
+            from flow_generator.gui.deps import _rewrite_dummy_paths_for_key
+
+            _rewrite_dummy_paths_for_key(self, key, new_key)
+
         return new_key
 
 
+def ensure_unique_stage_names(document: FlowDocument) -> List[str]:
+    """Rename later duplicate stage names so runner job keys stay unique.
+
+    Runner / GUI identify jobs as ``stage/task/job``. Two stages both named
+    ``a`` collide (status, edges, skip sets) and a failure in the second ``a``
+    aborts the flow before later stages. Link/unlink does not intentionally
+    create duplicates, but loaded JSON or repeated rename/prune cycles can.
+
+    Later duplicates become ``a_2``, ``a_3``, … (preserving list / canvas order).
+    Returns human-readable notes about renames performed.
+    """
+    from flow_generator.gui.deps import _rewrite_dummy_paths_for_key
+
+    notes: List[str] = []
+    seen_count: Dict[str, int] = {}
+    taken = {stage["name"] for stage in document.stages}
+
+    for stage in document.stages:
+        name = stage["name"]
+        seen_count[name] = seen_count.get(name, 0) + 1
+        if seen_count[name] == 1:
+            continue
+
+        suffix = seen_count[name]
+        new_name = f"{name}_{suffix}"
+        while new_name in taken:
+            suffix += 1
+            new_name = f"{name}_{suffix}"
+        taken.add(new_name)
+
+        for task in stage["tasks"]:
+            for job in task["jobs"]:
+                old_key = _job_key(name, task["name"], job["name"])
+                new_key = _job_key(new_name, task["name"], job["name"])
+                document._relocate_key(old_key, new_key)
+                _rewrite_dummy_paths_for_key(document, old_key, new_key)
+
+        stage["name"] = new_name
+        notes.append(f"renamed duplicate stage {name!r} → {new_name!r}")
+
+    return notes
+
+
+def reorder_document_by_canvas(document: FlowDocument) -> None:
+    """Reorder stages / tasks / jobs to match the canvas layout.
+
+    The runner executes stages in JSON list order and jobs within a task in
+    list order. The editor often leaves those lists out of sync with the
+    left-to-right / top-to-bottom canvas (e.g. renamed stages are appended).
+    Call this before export / sync so flow.json matches what the user sees.
+    """
+
+    def _pos(stage_name: str, task_name: str, job_name: str) -> Tuple[float, float]:
+        return document.positions.get(_job_key(stage_name, task_name, job_name), (0.0, 0.0))
+
+    for stage in document.stages:
+        stage_name = stage["name"]
+        for task in stage["tasks"]:
+            task_name = task["name"]
+            task["jobs"].sort(key=lambda job: _pos(stage_name, task_name, job["name"])[1])
+
+        def _task_y(task: Task, _sn: str = stage_name) -> float:
+            ys = [_pos(_sn, task["name"], job["name"])[1] for job in task["jobs"]]
+            return min(ys) if ys else 0.0
+
+        stage["tasks"].sort(key=_task_y)
+
+    def _stage_x(stage: Stage) -> float:
+        xs = [
+            _pos(stage["name"], task["name"], job["name"])[0]
+            for task in stage["tasks"]
+            for job in task["jobs"]
+        ]
+        return min(xs) if xs else 0.0
+
+    document.stages.sort(key=_stage_x)
+
+
 def document_to_flow(document: FlowDocument) -> Flow:
-    return make_flow(document.flow_name, copy.deepcopy(document.stages), document.poll_interval)
+    ensure_unique_stage_names(document)
+    reorder_document_by_canvas(document)
+    # Preserve editor parents/children; do not re-seed from task-order/file.
+    return make_flow(
+        document.flow_name,
+        copy.deepcopy(document.stages),
+        document.poll_interval,
+        seed_relations=False,
+    )
 
 
 def flow_to_document(flow: Flow) -> FlowDocument:
+    from flow_graph import ensure_job_relations
+
+    stages = copy.deepcopy(flow["stages"])
+    # Keep parents/children as the editor source of truth; seed if missing.
+    ensure_job_relations(stages)
     doc = FlowDocument(
         flow_name=flow["flow_name"],
         poll_interval=flow["poll_interval"],
-        stages=copy.deepcopy(flow["stages"]),
+        stages=stages,
     )
+    ensure_unique_stage_names(doc)
     auto_layout_all(doc)
     return doc
 
@@ -335,6 +504,7 @@ def pv_template(options: Optional[TemplateOptions] = None) -> FlowDocument:
         build_settings["TOP_MODULE"] = "TOP_MODULE"
     build_settings["MACHINE_QUEUE"] = opts.queue or DEFAULT_QUEUE
     build_settings["MACHINE_CPU"] = str(opts.cpu)
+    build_settings["USE_OASII"] = "1" if opts.use_oasii else "0"
 
     context = BuildContext(
         settings=build_settings,

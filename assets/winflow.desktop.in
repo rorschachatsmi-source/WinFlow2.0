@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=WinFlow
+Comment=EDA flow runner and generator for LSF
+Exec=python3 /ABS/PATH/TO/WinFlow2.0/winflow_gui.py
+Icon=/ABS/PATH/TO/WinFlow2.0/assets/winflow.png
+Terminal=false
+Categories=Development;Engineering;
+StartupNotify=true

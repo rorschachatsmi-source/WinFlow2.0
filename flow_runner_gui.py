@@ -8,6 +8,7 @@ and per-job log tailing from log/*.
 
 import json
 import os
+import queue
 import subprocess
 import sys
 import tkinter as tk
@@ -17,17 +18,58 @@ from pathlib import Path
 import threading
 from datetime import datetime
 from collections import defaultdict, deque
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple, Callable, Any
+import re
 
-from flow_graph import build_flow_graph_edges, compute_layers
+from flow_graph import build_relation_edges, compute_layers, ensure_job_relations
+from flow_generator.core.io import write_flow
 from flow_runner_core import create_flow_runner
+from job_log_io import is_job_log_noise, read_file_tail_lines, read_lines_before
+from lsf_jobs import is_job_not_found_message, lsf_job_alive, lsf_kill_job
 from winflow_config import get_config
+from winflow_icon import apply_window_icon
 
 # Segoe UI / Consolas are Windows fonts; missing glyphs on Linux X11 often trigger
 # RENDER RenderAddGlyphs BadLength errors. Use common Linux fonts as fallback.
+# Also avoid emoji / astral Unicode in labels — color-emoji font fallback crashes Tk.
 UI_FONT = "Segoe UI" if sys.platform == "win32" else "DejaVu Sans"
 MONO_FONT = "Consolas" if sys.platform == "win32" else "DejaVu Sans Mono"
 APP_BRAND = "WinFlow"
+
+
+def configure_safe_tk_fonts(root: tk.Misc) -> None:
+    """Pin Tk named fonts so fontconfig does not fall back to Noto Color Emoji."""
+    global UI_FONT, MONO_FONT
+    available = {name.lower(): name for name in tkfont.families(root)}
+
+    def _pick(candidates: Tuple[str, ...]) -> str:
+        for name in candidates:
+            hit = available.get(name.lower())
+            if hit:
+                return hit
+        return candidates[0]
+
+    if sys.platform == "win32":
+        UI_FONT = _pick(("Segoe UI", "Arial", "Tahoma"))
+        MONO_FONT = _pick(("Consolas", "Cascadia Mono", "Courier New"))
+    else:
+        UI_FONT = _pick(("DejaVu Sans", "Liberation Sans", "FreeSans", "Helvetica"))
+        MONO_FONT = _pick(("DejaVu Sans Mono", "Liberation Mono", "FreeMono", "Courier"))
+
+    for font_name, family, size in (
+        ("TkDefaultFont", UI_FONT, 9),
+        ("TkTextFont", UI_FONT, 9),
+        ("TkMenuFont", UI_FONT, 9),
+        ("TkHeadingFont", UI_FONT, 10),
+        ("TkCaptionFont", UI_FONT, 9),
+        ("TkSmallCaptionFont", UI_FONT, 8),
+        ("TkTooltipFont", UI_FONT, 8),
+        ("TkFixedFont", MONO_FONT, 9),
+    ):
+        try:
+            tkfont.nametofont(font_name).configure(family=family, size=size)
+        except tk.TclError:
+            pass
 
 # ── Visual theme ──────────────────────────────────────────────────────────────
 
@@ -66,11 +108,39 @@ STATUS_COLORS = {
 
 LIGHT_NODE_STATUSES = {"PEND", "pend"}
 
+# Job Log severity highlighting (case-insensitive keyword → tag)
+_JOB_LOG_SEVERITY_PATTERNS: List[Tuple[re.Pattern, str]] = [
+    (re.compile(r"\b(FATAL|CRITICAL)\b", re.IGNORECASE), "sev_fatal"),
+    (
+        re.compile(
+            r"\b(ERROR|ERRORS|FAILED|FAILURE|EXCEPTION|EXCEPTIONS|TRACEBACK)\b",
+            re.IGNORECASE,
+        ),
+        "sev_error",
+    ),
+    (re.compile(r"\b(WARNING|WARNINGS|WARN)\b", re.IGNORECASE), "sev_warning"),
+    (
+        re.compile(
+            r"\b(MISSING|NOT\s+FOUND|TIMEOUT|TIMED\s+OUT|ABORT|ABORTED|DENIED)\b",
+            re.IGNORECASE,
+        ),
+        "sev_alert",
+    ),
+]
+
+_RE_JOB_STATUS = re.compile(r"^\[(\d+)\] Status:\s*(\w+)\s*$")
+_RE_JOB_SUBMITTED = re.compile(r"^Job submitted:\s*(.+)\s*\(ID:\s*(\d+)\)\s*$")
+_RE_JOB_START = re.compile(r"^\[JOB\]\s+(.+)\s*$")
+_RE_JOB_SUCCESS = re.compile(r"^\[SUCCESS\]\s+(.+)\s*$")
+_RE_JOB_SKIP = re.compile(r"^\[SKIP\]\s+(.+)\s*$")
+_RE_JOB_DONE_OK = re.compile(r"^\[(\d+)\] Job completed successfully\s*$")
+_RE_JOB_EXIT = re.compile(r"^\[(\d+)\] Job exited with error\s*$")
+
 
 def _truncate_to_width(text: str, font: tkfont.Font, max_width: int) -> str:
     if font.measure(text) <= max_width:
         return text
-    ell = "…"
+    ell = "..."
     trimmed = text
     while trimmed and font.measure(trimmed + ell) > max_width:
         trimmed = trimmed[:-1]
@@ -153,17 +223,12 @@ class CanvasTooltip:
 
 FAILED_STATUSES = {"EXIT", "failed", "KILLING", "killing"}
 DONE_STATUSES = {"DONE", "done"}
+# Terminal / non-killable GUI statuses (Stop must ignore these).
+FINISHED_STATUSES = DONE_STATUSES | {"EXIT", "failed", "SKIP", "skip"}
 RERUN_BLOCKING_STATUSES = {"RUN", "running", "KILLING", "killing"}
 _APP_CFG = get_config()
 KILL_CHECK_INTERVAL_MS = _APP_CFG.runner.kill_poll_ms
 MAX_KILL_ATTEMPTS = _APP_CFG.runner.kill_max_retries
-JOB_NOT_FOUND_HINTS = (
-    "not found",
-    "no matching",
-    "does not exist",
-    "unknown job",
-    "already finished",
-)
 
 
 # ── Flow graph builder ────────────────────────────────────────────────────────
@@ -203,7 +268,9 @@ class FlowGraphModel:
                     self.nodes.append(node)
                     node_map[job_key] = node
 
-        labeled_edges = build_flow_graph_edges(self.config.get("stages", []))
+        stages = self.config.get("stages", [])
+        ensure_job_relations(stages)
+        labeled_edges = build_relation_edges(stages)
         self.edges = [(src, dst) for src, dst, _label in labeled_edges]
         self.layers = compute_layers(list(node_map.keys()), labeled_edges)
 
@@ -241,50 +308,7 @@ def format_runtime(start: Optional[datetime], end: Optional[datetime] = None) ->
 JOB_STATE_KEYS = ("status", "lsf_name", "job_id", "start_time", "end_time")
 
 
-# ── LSF helpers ───────────────────────────────────────────────────────────────
-
-def _run_lsf_cmd(cmd: List[str]) -> Tuple[int, str, str]:
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        return result.returncode, result.stdout.strip(), result.stderr.strip()
-    except OSError as exc:
-        return 1, "", str(exc)
-
-
-def is_job_not_found_message(msg: str) -> bool:
-    lowered = msg.lower()
-    return any(hint in lowered for hint in JOB_NOT_FOUND_HINTS)
-
-
-def lsf_job_alive(job_id: str = "", lsf_name: str = "") -> bool:
-    """Return True if the LSF job is still in the queue."""
-    if job_id:
-        code, out, _err = _run_lsf_cmd(["bjobs", "-noheader", str(job_id)])
-        if code == 0 and out:
-            return True
-    if lsf_name:
-        code, out, _err = _run_lsf_cmd(["bjobs", "-noheader", "-J", lsf_name])
-        if code == 0 and out:
-            return True
-    return False
-
-
-def lsf_kill_job(job_id: str = "", lsf_name: str = "") -> Tuple[bool, str]:
-    """Send bkill for a job by id or name."""
-    if job_id:
-        code, out, err = _run_lsf_cmd(["bkill", str(job_id)])
-        msg = out or err
-        if code == 0:
-            return True, msg
-        if is_job_not_found_message(msg):
-            return False, msg
-    if lsf_name:
-        code, out, err = _run_lsf_cmd(["bkill", "-J", lsf_name])
-        msg = out or err
-        if code == 0:
-            return True, msg
-        return False, msg
-    return False, "No job id or name available"
+# ── LSF helpers (imported from lsf_jobs) ──────────────────────────────────────
 
 
 class JobRegistry:
@@ -299,12 +323,32 @@ class JobRegistry:
             "lsf_name": lsf_name,
             "job_id": job_id,
             "registered_at": datetime.now(),
+            "finished": False,
         })
+
+    def mark_finished(
+        self,
+        job_key: str = "",
+        job_id: str = "",
+        lsf_name: str = "",
+    ) -> None:
+        """Mark matching submissions as finished so Stop will not target them."""
+        for entry in self.entries:
+            if entry.get("finished"):
+                continue
+            if job_id and entry.get("job_id") == job_id:
+                entry["finished"] = True
+            elif lsf_name and entry.get("lsf_name") == lsf_name:
+                entry["finished"] = True
+            elif job_key and entry.get("job_key") == job_key:
+                entry["finished"] = True
 
     def alive_entries(self) -> List[Dict]:
         alive = []
         seen = set()
         for entry in reversed(self.entries):
+            if entry.get("finished"):
+                continue
             uid = entry["job_id"] or entry["lsf_name"]
             if uid in seen:
                 continue
@@ -315,6 +359,9 @@ class JobRegistry:
 
     def alive_for_key(self, job_key: str) -> List[Dict]:
         return [e for e in self.alive_entries() if e["job_key"] == job_key]
+
+    def clear(self) -> None:
+        self.entries.clear()
 
 
 class JobKillMonitor:
@@ -348,22 +395,22 @@ class JobKillMonitor:
         for entry in entries:
             self.add(entry["job_key"], entry["job_id"], entry["lsf_name"])
 
+    def clear(self) -> None:
+        self._stop_timer()
+        self.targets.clear()
+
     def _set_node_status(self, job_key: str, status: str):
         if not self.gui.graph_model:
             return
-        node = self.gui.graph_model.get_node(job_key)
-        if node:
-            node["status"] = status
-        self.gui.graph_canvas.redraw()
+        self.gui.graph_canvas.update_job(job_key, status)
 
     def _mark_killed(self, job_key: str, label: str, reason: str):
         node = self.gui.graph_model.get_node(job_key) if self.gui.graph_model else None
         if node and node.get("status") == "KILLING":
-            node["status"] = "EXIT"
             if not node.get("end_time"):
                 node["end_time"] = datetime.now()
+            self.gui.graph_canvas.update_job(job_key, "EXIT")
         self.gui._log_callback(f"{reason}: {label}", "INFO")
-        self.gui.graph_canvas.redraw()
 
     def _finish_target(self, target_id: str, info: Dict, reason: str):
         label = info["lsf_name"] or info["job_id"]
@@ -452,7 +499,8 @@ class FlowGraphCanvas(tk.Canvas):
         self.model: Optional[FlowGraphModel] = None
         self.on_node_click = on_node_click
         self.positions: Dict[str, Tuple[int, int]] = {}
-        self.active_key: Optional[str] = None
+        # All jobs currently PEND/RUN (parallel tasks can flash together).
+        self.active_keys: Set[str] = set()
         self._pulse_on = False
         self._pulse_id: Optional[str] = None
         self._tooltip = CanvasTooltip(self)
@@ -464,7 +512,7 @@ class FlowGraphCanvas(tk.Canvas):
 
     def set_model(self, model: FlowGraphModel):
         self.model = model
-        self.active_key = None
+        self.active_keys.clear()
         self.redraw()
 
     def load_config(self, config: Dict):
@@ -482,14 +530,12 @@ class FlowGraphCanvas(tk.Canvas):
         if job_id:
             node["job_id"] = job_id
         if status in ("PEND", "RUN", "running", "pending", "job_start"):
-            if self.active_key != job_key:
-                if self._pulse_id:
-                    self.after_cancel(self._pulse_id)
-                    self._pulse_id = None
-                self.active_key = job_key
-        elif status in ("DONE", "done", "EXIT", "failed", "KILLING", "killing"):
-            if self.active_key == job_key and status not in ("KILLING", "killing"):
-                self.active_key = None
+            self.active_keys.add(job_key)
+        elif status in ("DONE", "done", "EXIT", "failed"):
+            self.active_keys.discard(job_key)
+        elif status in ("KILLING", "killing"):
+            # Keep pulsing while kill is in progress.
+            self.active_keys.add(job_key)
         self.redraw()
 
     def reset(self):
@@ -502,7 +548,7 @@ class FlowGraphCanvas(tk.Canvas):
                     start_time=None,
                     end_time=None,
                 )
-        self.active_key = None
+        self.active_keys.clear()
         self.redraw()
 
     def _bind_node_click(self, job_key: str):
@@ -539,9 +585,9 @@ class FlowGraphCanvas(tk.Canvas):
         self._draw_nodes()
         self._draw_stage_labels()
 
-        if self.active_key and not self._pulse_id:
+        if self.active_keys and not self._pulse_id:
             self._start_pulse()
-        elif not self.active_key and self._pulse_id:
+        elif not self.active_keys and self._pulse_id:
             self.after_cancel(self._pulse_id)
             self._pulse_id = None
 
@@ -552,27 +598,27 @@ class FlowGraphCanvas(tk.Canvas):
 
     def _pulse_tick(self):
         self._pulse_id = None
-        if self.active_key:
+        if self.active_keys:
             self._start_pulse()
 
     def _draw_pulse_only(self):
-        if not self.active_key or not self.model:
+        if not self.active_keys or not self.model:
             return
         self.delete("pulse")
-        key = self.active_key
-        if key not in self.positions:
-            return
-        x, y = self.positions[key]
-        x0 = x - self.NODE_W // 2 - 3
-        y0 = y - self.NODE_H // 2 - 3
-        x1 = x + self.NODE_W // 2 + 3
-        y1 = y + self.NODE_H // 2 + 3
-        self.create_rectangle(
-            x0, y0, x1, y1,
-            fill=COLORS["active_ring"] if self._pulse_on else COLORS["panel"],
-            outline="", tags="pulse"
-        )
-        self.tag_raise(key)
+        for key in list(self.active_keys):
+            if key not in self.positions:
+                continue
+            x, y = self.positions[key]
+            x0 = x - self.NODE_W // 2 - 3
+            y0 = y - self.NODE_H // 2 - 3
+            x1 = x + self.NODE_W // 2 + 3
+            y1 = y + self.NODE_H // 2 + 3
+            self.create_rectangle(
+                x0, y0, x1, y1,
+                fill=COLORS["active_ring"] if self._pulse_on else COLORS["panel"],
+                outline="", tags="pulse"
+            )
+            self.tag_raise(key)
 
     def _draw_placeholder(self, text: str):
         w = self.winfo_width() or 400
@@ -608,7 +654,7 @@ class FlowGraphCanvas(tk.Canvas):
             x2, y2 = self.positions[dst]
             sx = x1 + self.NODE_W // 2
             tx = x2 - self.NODE_W // 2
-            self.create_line(sx, y1, tx, y2, fill=COLORS["edge"], width=2, arrow=tk.LAST, smooth=True)
+            self.create_line(sx, y1, tx, y2, fill=COLORS["edge"], width=2, arrow=tk.LAST)
 
     def _draw_nodes(self):
         assert self.model
@@ -620,7 +666,7 @@ class FlowGraphCanvas(tk.Canvas):
             x0, y0 = x - self.NODE_W // 2, y - self.NODE_H // 2
             x1, y1 = x + self.NODE_W // 2, y + self.NODE_H // 2
             color = STATUS_COLORS.get(node["status"], COLORS["pending"])
-            is_active = key == self.active_key
+            is_active = key in self.active_keys
             if node["status"] in LIGHT_NODE_STATUSES:
                 title_fill, status_fill = COLORS["text"], COLORS["muted"]
             else:
@@ -677,7 +723,11 @@ class FlowGraphCanvas(tk.Canvas):
 # ── Job log tailer ────────────────────────────────────────────────────────────
 
 class JobLogTailer:
-    """Tail log/{job}.log and log/{job}.err in background."""
+    """Tail log/{job}.log and log/{job}.err in background.
+
+    On start, seeds the GUI with the last N lines (if the file is already large)
+    and only tails newly appended bytes afterward.
+    """
 
     def __init__(self, callback):
         self.callback = callback
@@ -685,15 +735,95 @@ class JobLogTailer:
         self._thread: Optional[threading.Thread] = None
         self._paths: List[Path] = []
         self._offsets: Dict[str, int] = {}
+        self._interval_sec = 0.5
+        # path -> {level, start, truncated} for lazy older-history loads
+        self.sources: Dict[str, Dict[str, Any]] = {}
 
-    def start(self, lsf_name: str):
+    def start(
+        self,
+        lsf_name: str,
+        initial_lines: Optional[int] = None,
+        seed: bool = True,
+        sources: Optional[Dict[str, Dict[str, Any]]] = None,
+    ):
+        """Start tailing ``lsf_name`` logs.
+
+        ``seed=True`` (default): push the last N lines into the GUI, then
+        only follow newly appended bytes.
+        ``seed=False``: resume from EOF using existing ``sources`` metadata
+        (used after a snapshot already loaded the visible window).
+        """
         self.stop()
         self._stop.clear()
+        runner_cfg = get_config().runner
+        self._interval_sec = float(runner_cfg.log_tail_interval_sec)
+        if initial_lines is None:
+            initial_lines = int(getattr(runner_cfg, "job_log_view_lines", 100) or 100)
         self._paths = [
-            Path(f"{get_config().runner.job_log_dir}/{lsf_name}.log"),
-            Path(f"{get_config().runner.job_log_dir}/{lsf_name}.err"),
+            Path(f"{runner_cfg.job_log_dir}/{lsf_name}.log"),
+            Path(f"{runner_cfg.job_log_dir}/{lsf_name}.err"),
         ]
-        self._offsets = {str(p): 0 for p in self._paths}
+        self._offsets = {}
+        self.sources = {}
+
+        if not seed and sources is not None:
+            self.sources = {k: dict(v) for k, v in sources.items()}
+            for path in self._paths:
+                key = str(path)
+                try:
+                    self._offsets[key] = path.stat().st_size if path.exists() else 0
+                except OSError:
+                    self._offsets[key] = 0
+                if key not in self.sources:
+                    level = "stderr" if path.suffix == ".err" else "stdout"
+                    self.sources[key] = {
+                        "level": level,
+                        "start": 0,
+                        "truncated": False,
+                        "path": path,
+                        "filename": path.name,
+                    }
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+            return
+
+        for path in self._paths:
+            level = "stderr" if path.suffix == ".err" else "stdout"
+            key = str(path)
+            if not path.exists():
+                self._offsets[key] = 0
+                self.sources[key] = {
+                    "level": level,
+                    "start": 0,
+                    "truncated": False,
+                    "path": path,
+                    "filename": path.name,
+                }
+                continue
+            try:
+                size = path.stat().st_size
+                lines, start, truncated = read_file_tail_lines(path, initial_lines)
+                self._offsets[key] = size  # live tail only sees new writes
+                self.sources[key] = {
+                    "level": level,
+                    "start": start,
+                    "truncated": truncated,
+                    "path": path,
+                    "filename": path.name,
+                }
+                if lines:
+                    chunk = "\n".join(lines) + "\n"
+                    self.callback(level, path.name, chunk, initial=True)
+            except OSError:
+                self._offsets[key] = 0
+                self.sources[key] = {
+                    "level": level,
+                    "start": 0,
+                    "truncated": False,
+                    "path": path,
+                    "filename": path.name,
+                }
+
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -704,6 +834,7 @@ class JobLogTailer:
         self._thread = None
 
     def _run(self):
+        interval = self._interval_sec
         while not self._stop.is_set():
             for path in self._paths:
                 if not path.exists():
@@ -716,10 +847,10 @@ class JobLogTailer:
                         self._offsets[key] = fp.tell()
                     if chunk:
                         kind = "stderr" if path.suffix == ".err" else "stdout"
-                        self.callback(kind, path.name, chunk)
+                        self.callback(kind, path.name, chunk, initial=False)
                 except OSError:
                     pass
-            self._stop.wait(get_config().runner.log_tail_interval_sec)
+            self._stop.wait(interval)
 
 
 # ── Job detail dialog ─────────────────────────────────────────────────────────
@@ -727,7 +858,7 @@ class JobLogTailer:
 class JobDetailDialog:
     """Popup window with job metadata and actions."""
 
-    def __init__(self, parent: tk.Tk, gui: "FlowRunnerGUI", job_key: str):
+    def __init__(self, parent: tk.Misc, gui: "FlowRunnerGUI", job_key: str):
         self.gui = gui
         self.job_key = job_key
         self._timer_id: Optional[str] = None
@@ -777,6 +908,13 @@ class JobDetailDialog:
 
         actions = tk.Frame(body, bg=COLORS["panel"])
         actions.pack(fill=tk.X, pady=(16, 0))
+
+        self.run_btn = tk.Button(
+            actions, text="Run Job", command=self._run_job,
+            bg=COLORS["done"], fg="white", font=(UI_FONT, 9, "bold"),
+            relief=tk.FLAT, padx=12, pady=6
+        )
+        self.run_btn.pack(side=tk.LEFT, padx=(0, 8))
 
         self.stop_btn = tk.Button(
             actions, text="Stop Job", command=self._stop_job,
@@ -843,9 +981,22 @@ class JobDetailDialog:
         self.end_var.set(format_timestamp(node.get("end_time")))
         self.runtime_var.set(format_runtime(node.get("start_time"), node.get("end_time")))
 
-        lsf_name = node.get("lsf_name", "")
-        has_target = bool(self.gui.job_registry.alive_for_key(self.job_key) or lsf_name)
+        # Avoid extra bjobs here: Stop is enabled while this job looks active,
+        # or when the registry still has a killable submission for it.
+        active_looking = status in RERUN_BLOCKING_STATUSES or status in {
+            "PEND", "pend", "PSUSP", "USUSP", "SSUSP", "WAIT",
+        }
+        has_target = active_looking or bool(
+            self.gui.job_registry.alive_for_key(self.job_key)
+        )
         self.stop_btn.config(state=tk.NORMAL if has_target else tk.DISABLED)
+
+        can_run = (
+            not self.gui.is_running
+            and not self.gui.kill_monitor.targets
+            and status not in RERUN_BLOCKING_STATUSES
+        )
+        self.run_btn.config(state=tk.NORMAL if can_run else tk.DISABLED)
 
     def _schedule_refresh(self):
         if not self.win.winfo_exists():
@@ -860,18 +1011,32 @@ class JobDetailDialog:
         if self.gui._detail_dialog is self:
             self.gui._detail_dialog = None
 
+    def _run_job(self):
+        self.gui._run_single_job(self.job_key, parent=self.win)
+
     def _stop_job(self):
         node = self._get_node()
         if not node:
             return
 
-        targets = self.gui.job_registry.alive_for_key(self.job_key)
+        if node.get("status") in FINISHED_STATUSES:
+            messagebox.showinfo(
+                "Stop Job",
+                "This job is already finished; nothing to kill.",
+                parent=self.win,
+            )
+            return
+
+        targets = self.gui._killable_entries(
+            self.gui.job_registry.alive_for_key(self.job_key)
+        )
         if not targets and node.get("job_id"):
-            targets = [{
+            candidate = {
                 "job_key": self.job_key,
                 "job_id": node.get("job_id", ""),
                 "lsf_name": node.get("lsf_name", ""),
-            }]
+            }
+            targets = self.gui._killable_entries([candidate])
 
         if not targets:
             messagebox.showwarning(
@@ -932,17 +1097,39 @@ class JobDetailDialog:
 class FlowRunnerGUI:
     """GUI for Flow Runner with DAG view and unified logging."""
 
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Misc, sync_source=None):
         self.root = root
-        self.root.title("WinFlow Runner")
-        gui_cfg = get_config().gui
-        self.root.geometry(gui_cfg.runner_window_size)
-        self.root.minsize(960, 640)
-        self.root.configure(bg=COLORS["bg"])
+        self.window = root.winfo_toplevel()
+        self.sync_source = sync_source
+        self._owns_window = isinstance(root, tk.Tk)
+
+        if self._owns_window:
+            self.root.title("WinFlow Runner")
+            gui_cfg = get_config().gui
+            self.root.geometry(gui_cfg.runner_window_size)
+            self.root.minsize(960, 640)
+            self.root.configure(bg=COLORS["bg"])
+            apply_window_icon(self.root)
+        else:
+            try:
+                self.root.configure(bg=COLORS["bg"])
+            except tk.TclError:
+                pass
 
         self.runner = None
         self.flow_log_messages: List[Tuple[str, str, str]] = []
         self.job_log_messages: List[Tuple[str, str, str]] = []
+        # Runner Log: one editable line per LSF job (keyed by job_id or pending name).
+        self._flow_job_marks: Dict[str, str] = {}  # key -> Text mark name
+        self._flow_job_state: Dict[str, Dict[str, str]] = {}  # key -> name/id/status
+        self._flow_name_to_key: Dict[str, str] = {}  # lsf job name -> mark key
+        self.job_log_issues_only = tk.BooleanVar(value=False)
+        self.job_log_search_var = tk.StringVar(value="")
+        self._job_log_search_matches: List[str] = []
+        self._job_log_search_index = -1
+        # Lazy Job Log: byte offsets for unread older content (.log / .err).
+        self._job_log_sources: Dict[str, Dict[str, Any]] = {}
+        self._job_log_loading_older = False
         self.is_running = False
         self.flow_config: Optional[Dict] = None
         self.graph_model: Optional[FlowGraphModel] = None
@@ -953,11 +1140,46 @@ class FlowRunnerGUI:
         self._detail_dialog: Optional[JobDetailDialog] = None
         self.job_registry = JobRegistry()
         self.kill_monitor = JobKillMonitor(self)
+        self.sync_btn: Optional[tk.Button] = None
+        self.verify_btn: Optional[tk.Button] = None
+        self._suppress_auto_load = False
+        # Tk is not thread-safe: never call root.after / widgets from worker threads.
+        self._ui_queue: queue.Queue = queue.Queue()
 
+        configure_safe_tk_fonts(self.window)
         self._setup_styles()
         self._setup_ui()
         self._bind_config_events()
+        self.root.after(50, self._poll_ui_queue)
         self.root.after(0, self._auto_load_graph)
+
+    def _call_ui(self, fn: Callable[..., Any], *args, **kwargs) -> None:
+        """Marshal a callable onto the Tk main thread (safe from any thread)."""
+        self._ui_queue.put((fn, args, kwargs))
+
+    def _poll_ui_queue(self) -> None:
+        try:
+            while True:
+                fn, args, kwargs = self._ui_queue.get_nowait()
+                try:
+                    fn(*args, **kwargs)
+                except tk.TclError:
+                    pass
+                except Exception as exc:
+                    try:
+                        self._append_flow_log(
+                            "ERROR",
+                            f"UI callback error: {exc}",
+                            datetime.now().strftime("%H:%M:%S"),
+                        )
+                    except Exception:
+                        pass
+        except queue.Empty:
+            pass
+        try:
+            self.root.after(50, self._poll_ui_queue)
+        except tk.TclError:
+            pass
 
     def _setup_styles(self):
         style = ttk.Style()
@@ -971,6 +1193,8 @@ class FlowRunnerGUI:
         self.config_path_var.trace_add("write", self._on_config_path_changed)
 
     def _on_config_path_changed(self, *_args):
+        if self._suppress_auto_load:
+            return
         self.root.after(get_config().runner.auto_load_delay_ms, self._auto_load_graph)
 
     def _init_paned_split(self):
@@ -1008,6 +1232,22 @@ class FlowRunnerGUI:
             font=(UI_FONT, 9), relief=tk.FLAT, bg="#f6f8fa", padx=8
         ).pack(side=tk.LEFT, padx=4)
 
+        self.sync_btn = None
+        if self.sync_source is not None:
+            self.sync_btn = tk.Button(
+                inner_top,
+                text="Sync from Generator",
+                command=self._sync_from_generator,
+                font=(UI_FONT, 9, "bold"),
+                relief=tk.FLAT,
+                bg=COLORS["accent"],
+                fg="white",
+                padx=10,
+                state=tk.DISABLED,
+            )
+            self.sync_btn.pack(side=tk.LEFT, padx=(8, 0))
+            self._update_sync_button()
+
         sep = tk.Frame(self.root, height=1, bg=COLORS["border"])
         sep.pack(fill=tk.X, padx=10)
 
@@ -1025,28 +1265,35 @@ class FlowRunnerGUI:
                  bg=COLORS["panel"], fg=COLORS["text"]).pack(pady=(14, 8))
 
         self.run_btn = tk.Button(
-            rail, text="▶  Run Flow", command=self._run_flow,
+            rail, text="Run Flow", command=self._run_flow,
             bg=COLORS["done"], fg="white", width=14, height=2,
             font=(UI_FONT, 9, "bold"), relief=tk.FLAT, cursor="hand2"
         )
         self.run_btn.pack(pady=6, padx=10)
 
         self.rerun_btn = tk.Button(
-            rail, text="↻  Rerun", command=self._rerun_from_failure,
+            rail, text="Rerun", command=self._rerun_from_failure,
             bg="#bf8700", fg="white", width=14, height=2,
             state=tk.DISABLED, font=(UI_FONT, 9, "bold"), relief=tk.FLAT
         )
         self.rerun_btn.pack(pady=6, padx=10)
 
         self.stop_btn = tk.Button(
-            rail, text="⏹  Stop", command=self._stop_flow,
+            rail, text="Stop", command=self._stop_flow,
             bg=COLORS["failed"], fg="white", width=14, height=2,
             state=tk.DISABLED, font=(UI_FONT, 9, "bold"), relief=tk.FLAT
         )
         self.stop_btn.pack(pady=6, padx=10)
 
+        self.verify_btn = tk.Button(
+            rail, text="Verify Outputs", command=self._verify_all_outputs,
+            bg="#8250df", fg="white", width=14, height=2,
+            state=tk.DISABLED, font=(UI_FONT, 9, "bold"), relief=tk.FLAT
+        )
+        self.verify_btn.pack(pady=6, padx=10)
+
         tk.Button(
-            rail, text="🗑  Clear Logs", command=self._clear_logs,
+            rail, text="Reset Flow", command=self._reset_flow,
             bg=COLORS["accent"], fg="white", width=14, height=2,
             font=(UI_FONT, 9, "bold"), relief=tk.FLAT
         ).pack(pady=6, padx=10)
@@ -1062,24 +1309,6 @@ class FlowRunnerGUI:
         )
         self.status_label.pack()
 
-        filter_box = tk.LabelFrame(
-            rail, text=" Log Filter ", font=(UI_FONT, 8),
-            bg=COLORS["panel"], fg=COLORS["muted"], padx=8, pady=4
-        )
-        filter_box.pack(pady=4, padx=8, fill=tk.X)
-        self.show_debug = tk.BooleanVar(value=False)
-        self.show_info = tk.BooleanVar(value=True)
-        self.show_warning = tk.BooleanVar(value=True)
-        self.show_error = tk.BooleanVar(value=True)
-        for var, label in [
-            (self.show_debug, "Debug"), (self.show_info, "Info"),
-            (self.show_warning, "Warning"), (self.show_error, "Error"),
-        ]:
-            tk.Checkbutton(
-                filter_box, text=label, variable=var, bg=COLORS["panel"],
-                font=(UI_FONT, 8), command=self._update_log_display
-            ).pack(anchor=tk.W)
-
         # Right main area — vertical split (drag sash to resize graph vs logs)
         main_area = tk.Frame(body, bg=COLORS["bg"])
         main_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -1089,7 +1318,7 @@ class FlowRunnerGUI:
 
         # Graph panel
         graph_frame = tk.LabelFrame(
-            self.main_paned, text=" Job Flow (left → right) ", font=(UI_FONT, 9, "bold"),
+            self.main_paned, text=" Job Flow (left -> right) ", font=(UI_FONT, 9, "bold"),
             bg=COLORS["panel"], fg=COLORS["text"], padx=4, pady=4
         )
         self.main_paned.add(graph_frame, weight=1)
@@ -1138,7 +1367,7 @@ class FlowRunnerGUI:
         self.job_selector_var = tk.StringVar(value="(auto-follow active job)")
         self.job_selector = ttk.Combobox(
             job_toolbar, textvariable=self.job_selector_var,
-            state="readonly", width=50, font=(UI_FONT, 9)
+            state="readonly", width=36, font=(UI_FONT, 9)
         )
         self.job_selector.pack(side=tk.LEFT, padx=6)
         self.job_selector.bind("<<ComboboxSelected>>", self._on_job_selected)
@@ -1148,37 +1377,91 @@ class FlowRunnerGUI:
             font=(UI_FONT, 8), relief=tk.FLAT
         ).pack(side=tk.LEFT, padx=4)
 
+        tk.Checkbutton(
+            job_toolbar,
+            text="Issues only",
+            variable=self.job_log_issues_only,
+            bg=COLORS["panel"],
+            font=(UI_FONT, 8),
+            command=self._update_job_log_display,
+        ).pack(side=tk.LEFT, padx=(10, 4))
+
+        search_row = tk.Frame(job_tab, bg=COLORS["panel"])
+        search_row.pack(fill=tk.X, padx=4, pady=(2, 0))
+        tk.Label(search_row, text="Search:", bg=COLORS["panel"],
+                 font=(UI_FONT, 9)).pack(side=tk.LEFT)
+        search_entry = tk.Entry(
+            search_row,
+            textvariable=self.job_log_search_var,
+            font=(UI_FONT, 9),
+            width=28,
+            relief=tk.FLAT,
+            bg="#f6f8fa",
+            highlightthickness=1,
+            highlightbackground=COLORS["border"],
+        )
+        search_entry.pack(side=tk.LEFT, padx=4)
+        search_entry.bind("<Return>", lambda _e: self._job_log_search(1))
+        tk.Button(
+            search_row, text="Find Next", command=lambda: self._job_log_search(1),
+            font=(UI_FONT, 8), relief=tk.FLAT,
+        ).pack(side=tk.LEFT, padx=2)
+        tk.Button(
+            search_row, text="Find Prev", command=lambda: self._job_log_search(-1),
+            font=(UI_FONT, 8), relief=tk.FLAT,
+        ).pack(side=tk.LEFT, padx=2)
+        self.job_log_search_status = tk.Label(
+            search_row, text="", bg=COLORS["panel"], fg=COLORS["muted"],
+            font=(UI_FONT, 8),
+        )
+        self.job_log_search_status.pack(side=tk.LEFT, padx=8)
+
         self.job_log_text = scrolledtext.ScrolledText(
             job_tab, wrap=tk.WORD, font=(MONO_FONT, 9),
             bg="#1e1e1e", fg="#d4d4d4", relief=tk.FLAT, state=tk.DISABLED,
             insertbackground="#d4d4d4"
         )
         self.job_log_text.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        # Load older history when the user scrolls toward the top.
+        self.job_log_text.bind("<MouseWheel>", self._on_job_log_scroll)
+        self.job_log_text.bind("<Button-4>", self._on_job_log_scroll)  # Linux up
+        self.job_log_text.bind("<Button-5>", self._on_job_log_scroll)  # Linux down
+        self.job_log_text.bind("<Prior>", self._on_job_log_scroll)  # PageUp
 
-        for widget in (self.flow_log_text, self.job_log_text):
-            for level, color in [
-                ("DEBUG", "#8b949e"), ("INFO", "#0969da"),
-                ("WARNING", "#bf8700"), ("ERROR", "#cf222e"),
-                ("STDOUT", "#3fb950"), ("STDERR", "#f85149"),
-            ]:
-                widget.tag_configure(level, foreground=color)
+        # Runner log tags (light theme)
+        for level, color in [
+            ("DEBUG", "#8b949e"), ("INFO", "#0969da"),
+            ("WARNING", "#bf8700"), ("ERROR", "#cf222e"),
+            ("JOB", "#0969da"), ("JOB_DONE", "#1a7f37"), ("JOB_FAIL", "#cf222e"),
+            ("JOB_RUN", "#0969da"), ("JOB_PEND", "#79c0ff"),
+        ]:
+            self.flow_log_text.tag_configure(level, foreground=color)
 
-        # Bottom bar
-        bottom = tk.Frame(self.root, bg=COLORS["panel"],
-                          highlightthickness=1, highlightbackground=COLORS["border"])
-        bottom.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(0, 10))
-
-        self.progress_var = tk.DoubleVar(value=0)
-        self.progress_bar = ttk.Progressbar(
-            bottom, variable=self.progress_var, maximum=100, mode="determinate"
+        # Job log tags (dark theme)
+        for level, color in [
+            ("DEBUG", "#8b949e"), ("INFO", "#58a6ff"),
+            ("WARNING", "#d29922"), ("ERROR", "#f85149"),
+            ("STDOUT", "#3fb950"), ("STDERR", "#f85149"),
+        ]:
+            self.job_log_text.tag_configure(level, foreground=color)
+        self.job_log_text.tag_configure(
+            "sev_fatal", foreground="#ff7b72", background="#4a1515", font=(MONO_FONT, 9, "bold")
         )
-        self.progress_bar.pack(fill=tk.X, padx=12, pady=(10, 4))
-
-        self.stats_label = tk.Label(
-            bottom, text="Ready to run", font=(UI_FONT, 9),
-            bg=COLORS["panel"], fg=COLORS["muted"], anchor=tk.W
+        self.job_log_text.tag_configure(
+            "sev_error", foreground="#ffa198", background="#3d1515", font=(MONO_FONT, 9, "bold")
         )
-        self.stats_label.pack(anchor=tk.W, padx=12, pady=(0, 8))
+        self.job_log_text.tag_configure(
+            "sev_warning", foreground="#e3b341", background="#3d2e00"
+        )
+        self.job_log_text.tag_configure(
+            "sev_alert", foreground="#ffa657", background="#3d2415"
+        )
+        self.job_log_text.tag_configure(
+            "search_hit", background="#9e6a03", foreground="#ffffff"
+        )
+        self.job_log_text.tag_configure(
+            "search_current", background="#f2cc60", foreground="#000000"
+        )
 
     # ── Config / graph ────────────────────────────────────────────────────────
 
@@ -1195,9 +1478,9 @@ class FlowRunnerGUI:
         if not Path(config_path).exists():
             return None
         try:
-            with open(config_path, "r") as fp:
+            with open(config_path, "r", encoding="utf-8") as fp:
                 config = json.load(fp)
-        except json.JSONDecodeError as e:
+        except (OSError, json.JSONDecodeError):
             return None
         return config
 
@@ -1233,10 +1516,7 @@ class FlowRunnerGUI:
                 1 for node in self.graph_model.nodes
                 if node.get("status") in ("DONE", "done", "EXIT", "failed")
             )
-            if self.total_jobs:
-                self.progress_var.set(100 * self.completed_jobs / self.total_jobs)
         self._refresh_job_selector()
-        self._update_stats()
         self._update_action_buttons()
 
     def _has_rerun_blocking_status(self) -> bool:
@@ -1257,14 +1537,149 @@ class FlowRunnerGUI:
             )
             self.rerun_btn.config(state=tk.NORMAL if can_rerun else tk.DISABLED)
 
-        alive = self.job_registry.alive_entries()
+        alive = self._killable_entries()
         has_kill_targets = bool(self.kill_monitor.targets)
         if self.stop_btn and not self.is_running:
             self.stop_btn.config(
                 state=tk.NORMAL if (alive or has_kill_targets) else tk.DISABLED
             )
+        if self.verify_btn:
+            can_verify = bool(self.graph_model and self.graph_model.nodes) and not self.is_running
+            self.verify_btn.config(state=tk.NORMAL if can_verify else tk.DISABLED)
+        self._update_sync_button()
+
+    def _can_sync(self) -> bool:
+        """Sync is available whenever Generator is linked and the runner is idle.
+
+        Stale node statuses (e.g. leftover RUN on the DAG) and LSF registry
+        entries must not permanently disable Sync — those are handled at click
+        time with a warning if needed.
+        """
+        if self.sync_source is None:
+            return False
+        if self.is_running:
+            return False
+        if self.kill_monitor.targets:
+            return False
+        return True
+
+    def _update_sync_button(self):
+        if not self.sync_btn:
+            return
+        self.sync_btn.config(state=tk.NORMAL if self._can_sync() else tk.DISABLED)
+
+    def _sync_from_generator(self):
+        parent = self.window
+        if not self._can_sync():
+            messagebox.showinfo(
+                "Sync",
+                "Cannot sync while a flow is running or jobs are being killed.",
+                parent=parent,
+            )
+            return
+        if self.sync_source is None:
+            return
+
+        alive = self._killable_entries()
+        if alive:
+            if not messagebox.askyesno(
+                "Sync",
+                f"{len(alive)} LSF job(s) still appear to be running.\n"
+                "Sync will replace the flow on the DAG anyway.\n\n"
+                "Continue?",
+                parent=parent,
+            ):
+                return
+
+        try:
+            flow = self.sync_source.get_flow_dict()
+        except ValueError as exc:
+            messagebox.showerror("Sync failed", str(exc), parent=parent)
+            return
+        except Exception as exc:
+            messagebox.showerror(
+                "Sync failed",
+                f"Unable to read generator flow:\n{exc}",
+                parent=parent,
+            )
+            return
+
+        out = self.sync_source.get_output_path()
+        try:
+            out = Path(out)
+            write_flow(flow, out)
+        except OSError as exc:
+            messagebox.showerror(
+                "Sync failed",
+                f"Unable to write flow file:\n{exc}",
+                parent=parent,
+            )
+            return
+
+        # Reload from disk so Run always executes exactly what was written.
+        try:
+            with out.open("r", encoding="utf-8") as fp:
+                written = json.load(fp)
+        except (OSError, json.JSONDecodeError) as exc:
+            messagebox.showerror(
+                "Sync failed",
+                f"Wrote {out} but could not re-read it:\n{exc}",
+                parent=parent,
+            )
+            return
+
+        # Point runner at the written file without the auto-load path that
+        # preserves prior job statuses.
+        self._suppress_auto_load = True
+        try:
+            self.config_path_var.set(str(out.resolve()))
+        finally:
+            self._suppress_auto_load = False
+
+        self.flow_config = written
+        self.graph_model = FlowGraphModel(written)
+        self.graph_canvas.set_model(self.graph_model)
+        self.graph_canvas.reset()
+        self.completed_jobs = 0
+        self.total_jobs = len(self.graph_model.nodes)
+        self._refresh_job_selector()
+        self._update_action_buttons()
+        self._update_status("Synced", COLORS["accent"])
+        stage_names = [s.get("name", "?") for s in written.get("stages", [])]
+        self._log_callback(
+            f"Synced flow from Generator -> {out.resolve()} "
+            f"({self.total_jobs} job(s); stages: {' -> '.join(stage_names)})",
+            "INFO",
+        )
+
+    def _killable_entries(self, entries: Optional[List[Dict]] = None) -> List[Dict]:
+        """LSF submissions that are still active (never kill DONE/EXIT jobs)."""
+        candidates = entries if entries is not None else self.job_registry.alive_entries()
+        killable: List[Dict] = []
+        for entry in candidates:
+            if entry.get("finished"):
+                continue
+            job_key = entry.get("job_key", "")
+            node = self.graph_model.get_node(job_key) if self.graph_model else None
+            if node and node.get("status") in FINISHED_STATUSES:
+                self.job_registry.mark_finished(
+                    job_key=job_key,
+                    job_id=entry.get("job_id", ""),
+                    lsf_name=entry.get("lsf_name", ""),
+                )
+                continue
+            if not lsf_job_alive(entry.get("job_id", ""), entry.get("lsf_name", "")):
+                self.job_registry.mark_finished(
+                    job_key=job_key,
+                    job_id=entry.get("job_id", ""),
+                    lsf_name=entry.get("lsf_name", ""),
+                )
+                continue
+            killable.append(entry)
+        return killable
 
     def _request_kill_entries(self, entries: List[Dict]):
+        entries = self._killable_entries(entries)
         if not entries:
             messagebox.showinfo("Stop", "No running LSF jobs found.")
             return
@@ -1283,7 +1698,7 @@ class FlowRunnerGUI:
     def _open_job_detail(self, job_key: str):
         if self._detail_dialog and self._detail_dialog.win.winfo_exists():
             self._detail_dialog._close()
-        self._detail_dialog = JobDetailDialog(self.root, self, job_key)
+        self._detail_dialog = JobDetailDialog(self.window, self, job_key)
 
     def _refresh_job_selector(self):
         if not self.graph_model:
@@ -1299,48 +1714,532 @@ class FlowRunnerGUI:
 
     def _log_callback(self, message: str, level: str):
         ts = datetime.now().strftime("%H:%M:%S")
+        self._call_ui(self._append_flow_log, level, message, ts)
+
+    def _append_flow_log(self, level: str, message: str, ts: str):
+        """Append to Runner Log, collapsing per-job status into one updating line."""
+        if self._try_upsert_job_flow_line(level, message, ts):
+            return
         self.flow_log_messages.append((level, message, ts))
-        self.root.after(0, self._update_log_display)
+        self._insert_flow_log_line(level, f"[{ts}] [{level}] {message}\n", level)
 
-    def _on_job_log_chunk(self, kind: str, filename: str, chunk: str):
-        level = "STDERR" if kind == "stderr" else "STDOUT"
-        ts = datetime.now().strftime("%H:%M:%S")
-        for line in chunk.splitlines(keepends=True):
-            if line.strip():
-                self.job_log_messages.append((level, f"[{filename}] {line.rstrip()}", ts))
-        self.root.after(0, self._update_log_display)
-
-    def _should_show(self, level: str) -> bool:
-        if level in ("STDOUT", "STDERR"):
-            return True
-        if level == "DEBUG":
-            return self.show_debug.get()
-        if level == "INFO":
-            return self.show_info.get()
-        if level == "WARNING":
-            return self.show_warning.get()
-        if level == "ERROR":
-            return self.show_error.get()
-        return True
-
-    def _fill_log_widget(self, widget, messages: List[Tuple[str, str, str]]):
+    def _insert_flow_log_line(self, _level: str, text: str, tag: str) -> str:
+        """Insert a line at end of Runner Log; return Text index of line start."""
+        widget = self.flow_log_text
         widget.config(state=tk.NORMAL)
-        widget.delete(1.0, tk.END)
-        for level, message, timestamp in messages:
-            if not self._should_show(level):
-                continue
-            widget.insert(tk.END, f"[{timestamp}] [{level}] {message}\n", level)
+        start = widget.index(tk.END + "-1c")
+        widget.insert(tk.END, text, tag)
+        widget.config(state=tk.DISABLED)
+        widget.see(tk.END)
+        return start
+
+    def _flow_job_line_text(self, state: Dict[str, str], ts: str) -> Tuple[str, str]:
+        name = state.get("name") or "?"
+        job_id = state.get("job_id") or "-"
+        status = state.get("status") or "…"
+        line = f"[{ts}] [JOB] {name}  id={job_id}  {status}\n"
+        status_u = status.upper()
+        if status_u in ("DONE", "SUCCESS"):
+            tag = "JOB_DONE"
+        elif status_u in ("EXIT", "FAILED", "ERROR"):
+            tag = "JOB_FAIL"
+        elif status_u == "RUN":
+            tag = "JOB_RUN"
+        elif status_u == "PEND":
+            tag = "JOB_PEND"
+        else:
+            tag = "JOB"
+        return line, tag
+
+    def _upsert_job_flow_line(
+        self,
+        *,
+        key: str,
+        name: str = "",
+        job_id: str = "",
+        status: str = "",
+        ts: str,
+    ) -> None:
+        # Prefer an existing row for this LSF name or numeric id.
+        if job_id and job_id in self._flow_job_state:
+            key = job_id
+        elif name and name in self._flow_name_to_key:
+            key = self._flow_name_to_key[name]
+
+        state = self._flow_job_state.setdefault(
+            key, {"name": "", "job_id": "", "status": ""}
+        )
+        if name:
+            state["name"] = name
+            self._flow_name_to_key[name] = key
+        if status:
+            state["status"] = status
+        if job_id:
+            state["job_id"] = job_id
+            if key != job_id:
+                mark = self._flow_job_marks.pop(key, None)
+                self._flow_job_state.pop(key, None)
+                self._flow_job_state[job_id] = state
+                if mark:
+                    self._flow_job_marks[job_id] = mark
+                if name:
+                    self._flow_name_to_key[name] = job_id
+                key = job_id
+
+        line, tag = self._flow_job_line_text(state, ts)
+        widget = self.flow_log_text
+        mark = self._flow_job_marks.get(key)
+        widget.config(state=tk.NORMAL)
+        if mark and mark in widget.mark_names():
+            start = widget.index(f"{mark} linestart")
+            end = widget.index(f"{mark} lineend + 1 chars")
+            widget.delete(start, end)
+            widget.insert(start, line, tag)
+            widget.mark_set(mark, start)
+        else:
+            start = widget.index(tk.END + "-1c")
+            widget.insert(tk.END, line, tag)
+            mark = f"flowjob_{re.sub(r'[^0-9A-Za-z_]', '_', key)[:80]}"
+            widget.mark_set(mark, start)
+            widget.mark_gravity(mark, tk.LEFT)
+            self._flow_job_marks[key] = mark
         widget.config(state=tk.DISABLED)
         widget.see(tk.END)
 
-    def _update_log_display(self):
-        self._fill_log_widget(self.flow_log_text, self.flow_log_messages)
-        self._fill_log_widget(self.job_log_text, self.job_log_messages)
+    def _try_upsert_job_flow_line(self, level: str, message: str, ts: str) -> bool:
+        msg = message.strip()
 
-    def _clear_logs(self):
+        m = _RE_JOB_STATUS.match(msg)
+        if m:
+            job_id, status = m.group(1), m.group(2)
+            key = job_id
+            # If we only knew the name before submit completed, state may already
+            # have been migrated to job_id via Job submitted.
+            self._upsert_job_flow_line(key=key, job_id=job_id, status=status, ts=ts)
+            return True
+
+        m = _RE_JOB_DONE_OK.match(msg)
+        if m:
+            self._upsert_job_flow_line(key=m.group(1), job_id=m.group(1), status="DONE", ts=ts)
+            return True
+
+        m = _RE_JOB_EXIT.match(msg)
+        if m:
+            self._upsert_job_flow_line(key=m.group(1), job_id=m.group(1), status="EXIT", ts=ts)
+            return True
+
+        m = _RE_JOB_SUBMITTED.match(msg)
+        if m:
+            name, job_id = m.group(1).strip(), m.group(2)
+            # Reuse pending name key if present.
+            key = self._flow_name_to_key.get(name, name)
+            self._upsert_job_flow_line(
+                key=key, name=name, job_id=job_id, status="PEND", ts=ts
+            )
+            return True
+
+        m = _RE_JOB_START.match(msg)
+        if m:
+            name = m.group(1).strip()
+            key = self._flow_name_to_key.get(name, name)
+            self._upsert_job_flow_line(key=key, name=name, status="starting", ts=ts)
+            return True
+
+        m = _RE_JOB_SUCCESS.match(msg)
+        if m:
+            name = m.group(1).strip()
+            key = self._flow_name_to_key.get(name, name)
+            self._upsert_job_flow_line(key=key, name=name, status="DONE", ts=ts)
+            return True
+
+        m = _RE_JOB_SKIP.match(msg)
+        if m:
+            name = m.group(1).strip()
+            key = f"skip:{name}"
+            self._upsert_job_flow_line(key=key, name=name, status="SKIP", ts=ts)
+            return True
+
+        return False
+
+    def _on_job_log_chunk(
+        self, kind: str, filename: str, chunk: str, initial: bool = False
+    ):
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._call_ui(self._append_job_log_chunk, kind, filename, chunk, ts, initial)
+
+    def _append_job_log_chunk(
+        self,
+        kind: str,
+        filename: str,
+        chunk: str,
+        ts: str,
+        initial: bool = False,
+    ):
+        level = "STDERR" if kind == "stderr" else "STDOUT"
+        issues_only = bool(self.job_log_issues_only.get())
+        new_rows: List[Tuple[str, str, str]] = []
+        for line in chunk.splitlines():
+            if is_job_log_noise(line):
+                continue
+            if line.strip():
+                new_rows.append((level, f"[{filename}] {line.rstrip()}", ts))
+        if not new_rows:
+            if initial:
+                self._sync_job_log_sources_from_tailer()
+                self._ensure_job_log_truncation_banner()
+            return
+
+        self.job_log_messages.extend(new_rows)
+        if initial:
+            self._sync_job_log_sources_from_tailer()
+
+        # Append-only: never rebuild the whole Text widget on each tail poll.
+        # Full rebuild is reserved for Issues-only toggle / snapshot load.
+        widget = self.job_log_text
+        at_end = self._job_log_view_near_end()
+        needle = self.job_log_search_var.get().strip()
+        widget.config(state=tk.NORMAL)
+        if initial:
+            self._ensure_job_log_truncation_banner(insert=True)
+        for row_level, message, timestamp in new_rows:
+            if issues_only and not self._job_log_line_is_issue(row_level, message):
+                continue
+            line_start = widget.index(tk.END + "-1c")
+            self._insert_job_log_line(row_level, message, timestamp)
+            if needle:
+                self._job_log_search_in_range(needle, line_start, tk.END)
+        widget.config(state=tk.DISABLED)
+        if at_end or initial:
+            widget.see(tk.END)
+
+    def _sync_job_log_sources_from_tailer(self) -> None:
+        if self.job_tailer.sources:
+            self._job_log_sources = dict(self.job_tailer.sources)
+
+    def _job_log_has_older(self) -> bool:
+        return any(
+            bool(src.get("truncated")) and int(src.get("start") or 0) > 0
+            for src in self._job_log_sources.values()
+        )
+
+    def _clear_job_log_widget(self) -> None:
+        widget = self.job_log_text
+        widget.config(state=tk.NORMAL)
+        widget.delete(1.0, tk.END)
+        widget.config(state=tk.DISABLED)
+        self._job_log_search_matches = []
+        self._job_log_search_index = -1
+        if hasattr(self, "job_log_search_status"):
+            self.job_log_search_status.config(text="")
+
+    def _ensure_job_log_truncation_banner(self, insert: bool = False) -> None:
+        """Show a one-line hint when older content exists but is not loaded."""
+        widget = self.job_log_text
+        tag = "trunc_banner"
+        widget.config(state=tk.NORMAL)
+        ranges = widget.tag_ranges(tag)
+        has_banner = bool(ranges)
+        want = self._job_log_has_older()
+        if want and not has_banner and insert:
+            widget.insert(
+                "1.0",
+                "[...] earlier log not loaded — scroll up or search to load more\n",
+                ("INFO", tag),
+            )
+        elif not want and has_banner:
+            widget.delete(ranges[0], ranges[1])
+        widget.config(state=tk.DISABLED)
+
+    def _job_log_view_near_top(self) -> bool:
+        try:
+            first, _last = self.job_log_text.yview()
+            return float(first) <= 0.02
+        except (tk.TclError, ValueError, TypeError):
+            return False
+
+    def _on_job_log_scroll(self, event=None):
+        """Load older lines when the user scrolls toward the top."""
+        going_up = True
+        if event is not None:
+            delta = int(getattr(event, "delta", 0) or 0)
+            num = getattr(event, "num", None)
+            keysym = getattr(event, "keysym", "") or ""
+            if num == 5 or delta < 0 or keysym == "Next":
+                going_up = False
+            if keysym == "Prior":
+                going_up = True
+        if going_up and self._job_log_view_near_top():
+            self._load_older_job_log()
+        return None
+
+    def _view_chunk_lines(self) -> int:
+        return int(getattr(get_config().runner, "job_log_view_lines", 100) or 100)
+
+    def _load_older_job_log(self, max_lines: Optional[int] = None) -> bool:
+        """Prepend up to ``max_lines`` older lines from truncated sources.
+
+        Returns True if any lines were loaded.
+        """
+        if self._job_log_loading_older or not self._job_log_has_older():
+            return False
+        self._job_log_loading_older = True
+        try:
+            n = max_lines if max_lines is not None else self._view_chunk_lines()
+            older_rows: List[Tuple[str, str, str]] = []
+            ts = datetime.now().strftime("%H:%M:%S")
+            for key, src in list(self._job_log_sources.items()):
+                start = int(src.get("start") or 0)
+                if not src.get("truncated") or start <= 0:
+                    continue
+                path = src.get("path") or Path(key)
+                try:
+                    lines, new_start = read_lines_before(Path(path), start, n)
+                except OSError:
+                    continue
+                level = "STDERR" if src.get("level") == "stderr" else "STDOUT"
+                filename = src.get("filename") or Path(path).name
+                for line in lines:
+                    if is_job_log_noise(line):
+                        continue
+                    if line.strip():
+                        older_rows.append(
+                            (level, f"[{filename}] {line.rstrip()}", ts)
+                        )
+                src["start"] = new_start
+                src["truncated"] = new_start > 0
+                if key in self.job_tailer.sources:
+                    self.job_tailer.sources[key]["start"] = new_start
+                    self.job_tailer.sources[key]["truncated"] = new_start > 0
+
+            if not older_rows:
+                self._ensure_job_log_truncation_banner(insert=True)
+                return False
+
+            self.job_log_messages = older_rows + self.job_log_messages
+            widget = self.job_log_text
+            issues_only = bool(self.job_log_issues_only.get())
+            visible = [
+                row
+                for row in older_rows
+                if not (
+                    issues_only
+                    and not self._job_log_line_is_issue(row[0], row[1])
+                )
+            ]
+            widget.config(state=tk.NORMAL)
+            # Keep the previously visible top line after we prepend.
+            try:
+                widget.mark_set("keep_top", widget.index("@0,0"))
+                widget.mark_gravity("keep_top", tk.RIGHT)
+            except tk.TclError:
+                widget.mark_set("keep_top", "1.0")
+
+            ranges = widget.tag_ranges("trunc_banner")
+            if ranges:
+                widget.delete(ranges[0], ranges[1])
+
+            # Insert oldest-first by pushing each line at 1.0 in reverse.
+            for row_level, message, timestamp in reversed(visible):
+                line = f"[{timestamp}] [{row_level}] {message}\n"
+                widget.insert("1.0", line, row_level)
+                # Re-apply severity highlights on the message portion.
+                prefix_len = len(f"[{timestamp}] [{row_level}] ")
+                msg_start = f"1.0+{prefix_len}c"
+                for pattern, tag in _JOB_LOG_SEVERITY_PATTERNS:
+                    for match in pattern.finditer(message):
+                        a = f"{msg_start}+{match.start()}c"
+                        b = f"{msg_start}+{match.end()}c"
+                        widget.tag_add(tag, a, b)
+
+            if self._job_log_has_older():
+                widget.insert(
+                    "1.0",
+                    "[...] earlier log not loaded — scroll up or search to load more\n",
+                    ("INFO", "trunc_banner"),
+                )
+
+            widget.config(state=tk.DISABLED)
+            try:
+                widget.see("keep_top")
+            except tk.TclError:
+                pass
+            return True
+        finally:
+            self._job_log_loading_older = False
+
+    def _job_log_view_near_end(self) -> bool:
+        """True if the user is already scrolled near the bottom (auto-follow)."""
+        widget = self.job_log_text
+        try:
+            # yview returns (first, last) as fractions of the document.
+            _first, last = widget.yview()
+            return float(last) >= 0.98
+        except (tk.TclError, ValueError, TypeError):
+            return True
+
+    @staticmethod
+    def _job_log_line_is_issue(level: str, message: str) -> bool:
+        if level == "STDERR":
+            return True
+        for pattern, _tag in _JOB_LOG_SEVERITY_PATTERNS:
+            if pattern.search(message):
+                return True
+        return False
+
+    def _insert_job_log_line(self, level: str, message: str, timestamp: str) -> None:
+        widget = self.job_log_text
+        prefix = f"[{timestamp}] [{level}] "
+        widget.insert(tk.END, prefix, level)
+        msg_start = widget.index("end-1c")
+        widget.insert(tk.END, message + "\n", level)
+        for pattern, tag in _JOB_LOG_SEVERITY_PATTERNS:
+            for match in pattern.finditer(message):
+                a = f"{msg_start}+{match.start()}c"
+                b = f"{msg_start}+{match.end()}c"
+                widget.tag_add(tag, a, b)
+
+    def _update_job_log_display(self):
+        """Full rebuild (Issues-only toggle, job switch / snapshot load)."""
+        widget = self.job_log_text
+        issues_only = bool(self.job_log_issues_only.get())
+        widget.config(state=tk.NORMAL)
+        widget.delete(1.0, tk.END)
+        if self._job_log_has_older():
+            widget.insert(
+                tk.END,
+                "[...] earlier log not loaded — scroll up or search to load more\n",
+                ("INFO", "trunc_banner"),
+            )
+        for level, message, timestamp in self.job_log_messages:
+            if issues_only and not self._job_log_line_is_issue(level, message):
+                continue
+            self._insert_job_log_line(level, message, timestamp)
+        widget.config(state=tk.DISABLED)
+        widget.see(tk.END)
+        if self.job_log_search_var.get().strip():
+            self._job_log_search(0)
+
+    def _job_log_search_in_range(self, needle: str, start: str, stop: str) -> None:
+        """Add search_hit tags for needle within [start, stop); update match list."""
+        widget = self.job_log_text
+        pos = start
+        while True:
+            found = widget.search(needle, pos, stopindex=stop, nocase=True)
+            if not found:
+                break
+            end = f"{found}+{len(needle)}c"
+            widget.tag_add("search_hit", found, end)
+            self._job_log_search_matches.append(found)
+            pos = end
+        total = len(self._job_log_search_matches)
+        if total and self._job_log_search_index < 0:
+            self._job_log_search_index = 0
+        if total:
+            idx = max(0, min(self._job_log_search_index, total - 1))
+            self.job_log_search_status.config(text=f"{idx + 1} / {total}")
+        elif needle:
+            self.job_log_search_status.config(text="No matches")
+
+    def _job_log_search(self, direction: int) -> None:
+        """Highlight all matches; direction 1=next, -1=prev, 0=refresh only.
+
+        If nothing matches in the loaded window and older content exists, load
+        older chunks until a match appears or history is exhausted.
+        """
+        needle = self.job_log_search_var.get().strip()
+        widget = self.job_log_text
+        widget.tag_remove("search_hit", "1.0", tk.END)
+        widget.tag_remove("search_current", "1.0", tk.END)
+        self._job_log_search_matches = []
+        if not needle:
+            self.job_log_search_status.config(text="")
+            self._job_log_search_index = -1
+            return
+
+        # Try current buffer; if empty and truncated, pull older history.
+        attempts = 0
+        while True:
+            widget.config(state=tk.NORMAL)
+            self._job_log_search_matches = []
+            widget.tag_remove("search_hit", "1.0", tk.END)
+            start = "1.0"
+            while True:
+                pos = widget.search(needle, start, stopindex=tk.END, nocase=True)
+                if not pos:
+                    break
+                end = f"{pos}+{len(needle)}c"
+                widget.tag_add("search_hit", pos, end)
+                self._job_log_search_matches.append(pos)
+                start = end
+            widget.config(state=tk.DISABLED)
+
+            if self._job_log_search_matches:
+                break
+            if not self._job_log_has_older() or attempts >= 50:
+                break
+            if not self._load_older_job_log():
+                break
+            attempts += 1
+
+        total = len(self._job_log_search_matches)
+        if total == 0:
+            self._job_log_search_index = -1
+            extra = " (loaded all)" if attempts else ""
+            self.job_log_search_status.config(text=f"No matches{extra}")
+            return
+
+        if direction == 0 and self._job_log_search_index >= 0:
+            idx = min(self._job_log_search_index, total - 1)
+        elif direction < 0:
+            idx = (self._job_log_search_index - 1) % total
+        else:
+            idx = (self._job_log_search_index + 1) % total
+
+        self._job_log_search_index = idx
+        pos = self._job_log_search_matches[idx]
+        end = f"{pos}+{len(needle)}c"
+        widget.tag_add("search_current", pos, end)
+        widget.see(pos)
+        self.job_log_search_status.config(text=f"{idx + 1} / {total}")
+
+    def _clear_flow_job_lines(self) -> None:
+        self._flow_job_marks.clear()
+        self._flow_job_state.clear()
+        self._flow_name_to_key.clear()
+
+    def _update_log_display(self):
+        # Kept for callers that expect a full refresh of both panes.
+        self._update_job_log_display()
+
+
+    def _reset_flow(self):
+        """Clear logs, drop LSF tracking, and reset every job to waiting."""
+        parent = self.window
+        if self.is_running:
+            messagebox.showinfo(
+                "Reset Flow",
+                "Cannot reset while a flow is running. Stop it first.",
+                parent=parent,
+            )
+            return
+        if self.kill_monitor.targets:
+            messagebox.showinfo(
+                "Reset Flow",
+                "Cannot reset while jobs are being killed. Wait until kill finishes.",
+                parent=parent,
+            )
+            return
+
+        # Keep Clear Logs behavior.
         self.job_tailer.stop()
         self.flow_log_messages = []
         self.job_log_messages = []
+        self._job_log_sources = {}
+        self._clear_flow_job_lines()
+        self._job_log_search_matches = []
+        self._job_log_search_index = -1
+        if hasattr(self, "job_log_search_status"):
+            self.job_log_search_status.config(text="")
         deleted = 0
         runner_cfg = get_config().runner
         for directory in (Path(runner_cfg.job_log_dir), Path(runner_cfg.session_log_dir)):
@@ -1357,9 +2256,25 @@ class FlowRunnerGUI:
             w.config(state=tk.NORMAL)
             w.delete(1.0, tk.END)
             w.config(state=tk.DISABLED)
+
+        # Forget LSF submissions / kill state so Stop no longer tracks old jobs.
+        self.job_registry.clear()
+        self.kill_monitor.clear()
         self.current_lsf_name = ""
+        self.completed_jobs = 0
+
+        # All DAG nodes back to waiting (pending).
+        if self.graph_model:
+            self.graph_canvas.reset()
+            self.total_jobs = len(self.graph_model.nodes)
+        self._refresh_job_selector()
+        self._update_action_buttons()
         self._update_status("Ready", COLORS["done"])
-        self.stats_label.config(text=f"Logs cleared, deleted {deleted} files")
+        self._log_callback(
+            f"Flow reset: job statuses cleared, LSF tracking dropped, "
+            f"deleted {deleted} log file(s)",
+            "INFO",
+        )
 
     def _on_job_selected(self, _event=None):
         if not self.graph_model:
@@ -1373,23 +2288,57 @@ class FlowRunnerGUI:
             self._load_job_log_snapshot(lsf_name)
 
     def _load_job_log_snapshot(self, lsf_name: str):
-        """Load full content of job log files into job log panel."""
+        """Load the last N lines of job log files into the Job Log panel."""
+        self.job_tailer.stop()
         self.job_log_messages = []
-        for suffix in (".log", ".err"):
-            path = Path(f"log/{lsf_name}{suffix}")
-            if path.exists():
-                level = "STDERR" if suffix == ".err" else "STDOUT"
-                try:
-                    text = path.read_text(errors="replace")
-                    for line in text.splitlines():
-                        if line.strip():
-                            ts = datetime.now().strftime("%H:%M:%S")
-                            self.job_log_messages.append(
-                                (level, f"[{path.name}] {line}", ts)
-                            )
-                except OSError:
-                    pass
-        self._update_log_display()
+        self._job_log_sources = {}
+        n = self._view_chunk_lines()
+        runner_cfg = get_config().runner
+        ts = datetime.now().strftime("%H:%M:%S")
+        for suffix, kind in ((".log", "stdout"), (".err", "stderr")):
+            path = Path(f"{runner_cfg.job_log_dir}/{lsf_name}{suffix}")
+            key = str(path)
+            if not path.exists():
+                self._job_log_sources[key] = {
+                    "level": kind,
+                    "start": 0,
+                    "truncated": False,
+                    "path": path,
+                    "filename": path.name,
+                }
+                continue
+            try:
+                lines, start, truncated = read_file_tail_lines(path, n)
+                self._job_log_sources[key] = {
+                    "level": kind,
+                    "start": start,
+                    "truncated": truncated,
+                    "path": path,
+                    "filename": path.name,
+                }
+                level = "STDERR" if kind == "stderr" else "STDOUT"
+                for line in lines:
+                    if is_job_log_noise(line):
+                        continue
+                    if line.strip():
+                        self.job_log_messages.append(
+                            (level, f"[{path.name}] {line}", ts)
+                        )
+            except OSError:
+                self._job_log_sources[key] = {
+                    "level": kind,
+                    "start": 0,
+                    "truncated": False,
+                    "path": path,
+                    "filename": path.name,
+                }
+        self._update_job_log_display()
+        # Resume live follow for the active job without re-seeding.
+        if self.is_running and lsf_name and lsf_name == self.current_lsf_name:
+            self.job_tailer.start(
+                lsf_name, seed=False, sources=self._job_log_sources
+            )
+            self._job_log_sources = dict(self.job_tailer.sources)
 
     def _open_job_log_file(self):
         if not self.graph_model:
@@ -1414,7 +2363,8 @@ class FlowRunnerGUI:
     # ── Job events ────────────────────────────────────────────────────────────
 
     def _job_callback(self, event: str, data: Dict):
-        self.root.after(0, lambda: self._handle_job_event(event, data))
+        # Called from the flow worker thread — do not touch Tk here.
+        self._call_ui(self._handle_job_event, event, dict(data))
 
     def _handle_job_event(self, event: str, data: Dict):
         job_key = data.get("job_key", "")
@@ -1434,9 +2384,13 @@ class FlowRunnerGUI:
 
         if event == "job_submitted":
             self.job_registry.register(job_key, lsf_name, job_id)
-            self.job_tailer.start(lsf_name)
             self.current_lsf_name = lsf_name
             self.job_log_messages = []
+            self._job_log_sources = {}
+            self._clear_job_log_widget()
+            # Start after clear so the initial tail seed is not wiped.
+            self.job_tailer.start(lsf_name)
+            self._job_log_sources = dict(self.job_tailer.sources)
             self.log_notebook.select(1)
             node = self.graph_model.get_node(job_key) if self.graph_model else None
             if node:
@@ -1454,14 +2408,16 @@ class FlowRunnerGUI:
             self.graph_canvas.update_job(job_key, status, lsf_name, job_id)
 
         if event == "job_done":
+            self.job_registry.mark_finished(
+                job_key=job_key, job_id=job_id, lsf_name=lsf_name
+            )
             self.completed_jobs += 1
-            self._update_stats()
-            if self.total_jobs:
-                self.progress_var.set(100 * self.completed_jobs / self.total_jobs)
 
         if event == "job_failed":
+            self.job_registry.mark_finished(
+                job_key=job_key, job_id=job_id, lsf_name=lsf_name
+            )
             self.completed_jobs += 1
-            self._update_stats()
             self._update_status("Failed", COLORS["failed"])
 
         if (
@@ -1473,21 +2429,41 @@ class FlowRunnerGUI:
 
         self._update_action_buttons()
 
-    def _update_stats(self):
-        self.stats_label.config(
-            text=f"Jobs: {self.completed_jobs}/{self.total_jobs} completed"
-        )
-
     # ── Run flow ──────────────────────────────────────────────────────────────
 
-    def _start_flow(self, config: Dict, job_filter=None, reset_incomplete: bool = False):
-        """Shared launcher for full run and rerun."""
-        if not reset_incomplete:
+    def _start_flow(
+        self,
+        config: Dict,
+        job_filter=None,
+        reset_incomplete: bool = False,
+        reset_keys: Optional[Set[str]] = None,
+    ):
+        """Shared launcher for full run, rerun, and single-job run."""
+        if reset_keys is not None:
+            if not self.graph_model:
+                self.graph_model = FlowGraphModel(config)
+                self.graph_canvas.set_model(self.graph_model)
+            for node in self.graph_model.nodes:
+                if node["key"] not in reset_keys:
+                    continue
+                node.update(
+                    status="pending",
+                    lsf_name="",
+                    job_id="",
+                    start_time=None,
+                    end_time=None,
+                )
+            self.completed_jobs = sum(
+                1
+                for node in self.graph_model.nodes
+                if node.get("status") in DONE_STATUSES
+            )
+            self.graph_canvas.redraw()
+        elif not reset_incomplete:
             self.graph_model = FlowGraphModel(config)
             self.graph_canvas.set_model(self.graph_model)
             self.graph_canvas.reset()
             self.completed_jobs = 0
-            self.progress_var.set(0)
         else:
             for node in self.graph_model.nodes:
                 if node.get("status") in DONE_STATUSES:
@@ -1503,20 +2479,17 @@ class FlowRunnerGUI:
                 1 for node in self.graph_model.nodes
                 if node.get("status") in DONE_STATUSES
             )
-            if self.total_jobs:
-                self.progress_var.set(100 * self.completed_jobs / self.total_jobs)
             self.graph_canvas.redraw()
 
         self.total_jobs = len(self.graph_model.nodes)
         self._refresh_job_selector()
-        self._update_stats()
-        self._update_action_buttons()
 
         self.is_running = True
         self.run_btn.config(state=tk.DISABLED)
         self.rerun_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
-        self._update_status("Running…", COLORS["running"])
+        self._update_action_buttons()
+        self._update_status("Running...", COLORS["running"])
 
         thread = threading.Thread(
             target=self._run_flow_thread,
@@ -1531,7 +2504,7 @@ class FlowRunnerGUI:
             messagebox.showerror("Error", f"Unable to load config: {self.config_path_var.get()}")
             return
 
-        alive = self.job_registry.alive_entries()
+        alive = self._killable_entries()
         if alive:
             self._log_callback(
                 f"Warning: {len(alive)} previous LSF job(s) still running. Use Stop to kill them.",
@@ -1579,6 +2552,61 @@ class FlowRunnerGUI:
         )
         self._start_flow(config, job_filter=job_filter, reset_incomplete=True)
 
+    def _run_single_job(self, job_key: str, parent: Optional[tk.Misc] = None):
+        """Run only one job (parents are treated as already satisfied / skipped)."""
+        parent = parent or self.window
+        config = self._load_config()
+        if not config:
+            messagebox.showerror(
+                "Run Job",
+                f"Unable to load config: {self.config_path_var.get()}",
+                parent=parent,
+            )
+            return
+
+        if not self.graph_model or not self.graph_model.nodes:
+            # Ensure the DAG exists so status updates have a node to paint.
+            self.flow_config = config
+            self.graph_model = FlowGraphModel(config)
+            self.graph_canvas.set_model(self.graph_model)
+            self.graph_canvas.reset()
+
+        node = self.graph_model.get_node(job_key)
+        if not node:
+            messagebox.showerror(
+                "Run Job",
+                f"Job not found on the DAG: {job_key}",
+                parent=parent,
+            )
+            return
+
+        if self.is_running or self.kill_monitor.targets:
+            messagebox.showinfo(
+                "Run Job",
+                "Cannot start a job while a flow is running or jobs are being killed.",
+                parent=parent,
+            )
+            return
+
+        if node.get("status") in RERUN_BLOCKING_STATUSES:
+            messagebox.showinfo(
+                "Run Job",
+                "This job is already RUN or KILLING. Stop it first.",
+                parent=parent,
+            )
+            return
+
+        # Reset only this node so a DONE/EXIT job can be re-submitted.
+        # Other nodes keep their current statuses.
+        label = node.get("label") or job_key
+        self.flow_config = config
+        self._log_callback(f"Run single job: {label}", "INFO")
+        self._start_flow(
+            config,
+            job_filter=lambda key: key == job_key,
+            reset_keys={job_key},
+        )
+
     def _run_flow_thread(self, config, job_filter=None):
         try:
             session_log_dir = get_config().runner.session_log_dir
@@ -1588,23 +2616,42 @@ class FlowRunnerGUI:
                 log_callback=self._log_callback,
                 job_callback=self._job_callback,
             )
-            self._log_callback(f"Flow log → {log_file}", "INFO")
+            self._log_callback(f"Flow log -> {log_file}", "INFO")
             self._log_callback("Starting flow execution", "INFO")
             self.runner.run_flow(config, job_filter=job_filter)
-            self.root.after(0, lambda: self._update_status("Completed ✓", COLORS["done"]))
-            self.root.after(0, lambda: messagebox.showinfo("Success", "Flow completed successfully!"))
-        except Exception as e:
-            self._log_callback(f"Error: {str(e)}", "ERROR")
-            self.root.after(0, lambda: self._update_status("Failed", COLORS["failed"]))
-            self.root.after(0, lambda: messagebox.showerror("Error", f"Flow execution failed:\n{e}"))
+            self._call_ui(self._on_flow_finished_ok)
+        except Exception as exc:
+            # Capture message now — exception vars are cleared when except ends,
+            # so deferred UI callbacks must not close over `exc`.
+            err_msg = str(exc)
+            self._log_callback(f"Error: {err_msg}", "ERROR")
+            self._call_ui(self._on_flow_finished_error, err_msg)
         finally:
             self.is_running = False
             self.job_tailer.stop()
-            self.root.after(0, lambda: self.run_btn.config(state=tk.NORMAL))
-            self.root.after(0, self._update_action_buttons)
+            self._call_ui(self._on_flow_thread_done)
+
+    def _on_flow_finished_ok(self):
+        self._update_status("Completed", COLORS["done"])
+        messagebox.showinfo("Success", "Flow completed successfully!", parent=self.window)
+
+    def _on_flow_finished_error(self, err_msg: str):
+        self._update_status("Failed", COLORS["failed"])
+        messagebox.showerror(
+            "Error",
+            f"Flow execution failed:\n{err_msg}",
+            parent=self.window,
+        )
+
+    def _on_flow_thread_done(self):
+        try:
+            self.run_btn.config(state=tk.NORMAL)
+        except tk.TclError:
+            pass
+        self._update_action_buttons()
 
     def _stop_flow(self):
-        alive = self.job_registry.alive_entries()
+        alive = self._killable_entries()
         if not alive:
             messagebox.showinfo("Stop", "No running LSF jobs found.")
             return
@@ -1618,11 +2665,89 @@ class FlowRunnerGUI:
 
         self._request_kill_entries(alive)
 
+    def _verify_all_outputs(self):
+        """Check that every job's output files exist; update node statuses."""
+        parent = self.window
+        if not self.graph_model or not self.graph_model.nodes:
+            messagebox.showinfo("Verify Outputs", "No jobs loaded.", parent=parent)
+            return
+        if self.is_running:
+            messagebox.showinfo(
+                "Verify Outputs",
+                "Cannot verify while a flow is running.",
+                parent=parent,
+            )
+            return
+
+        ok_jobs: List[str] = []
+        bad_jobs: List[Tuple[str, List[str]]] = []
+        skipped = 0
+
+        for node in self.graph_model.nodes:
+            outputs = node.get("outputs") or []
+            label = node.get("label") or node.get("key", "?")
+            if not outputs:
+                skipped += 1
+                continue
+            missing = [path for path in outputs if not os.path.exists(path)]
+            if missing:
+                node["status"] = "EXIT"
+                bad_jobs.append((label, missing))
+            else:
+                node["status"] = "DONE"
+                if node.get("start_time") and not node.get("end_time"):
+                    node["end_time"] = datetime.now()
+                ok_jobs.append(label)
+
+        self.completed_jobs = sum(
+            1
+            for node in self.graph_model.nodes
+            if node.get("status") in ("DONE", "done", "EXIT", "failed")
+        )
+        self.graph_canvas.redraw()
+        self._update_action_buttons()
+
+        if bad_jobs:
+            lines = [f"{name}: missing {len(paths)} file(s)" for name, paths in bad_jobs]
+            detail = "\n".join(
+                f"  - {path}" for _name, paths in bad_jobs for path in paths[:5]
+            )
+            more = sum(max(0, len(paths) - 5) for _n, paths in bad_jobs)
+            if more:
+                detail += f"\n  ... and {more} more"
+            self._log_callback(
+                f"Verify Outputs: {len(ok_jobs)} OK, {len(bad_jobs)} missing outputs",
+                "ERROR",
+            )
+            messagebox.showerror(
+                "Verify Outputs",
+                f"{len(ok_jobs)} job(s) OK, {len(bad_jobs)} job(s) missing outputs"
+                + (f", {skipped} with no outputs" if skipped else "")
+                + ":\n\n"
+                + "\n".join(lines)
+                + ("\n\n" + detail if detail else ""),
+                parent=parent,
+            )
+            return
+
+        self._log_callback(
+            f"Verify Outputs: all {len(ok_jobs)} job(s) have outputs"
+            + (f" ({skipped} with no outputs skipped)" if skipped else ""),
+            "INFO",
+        )
+        messagebox.showinfo(
+            "Verify Outputs",
+            f"All output files exist for {len(ok_jobs)} job(s)."
+            + (f"\n({skipped} job(s) have no outputs and were skipped.)" if skipped else "")
+            + "\nStatuses set to DONE.",
+            parent=parent,
+        )
+
     def _update_status(self, status: str, color: str = COLORS["accent"]):
         self.status_label.config(text=status, fg=color)
 
     def run(self):
-        self.root.mainloop()
+        self.window.mainloop()
 
 
 def main():

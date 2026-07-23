@@ -25,7 +25,7 @@ def sample_config(**overrides):
         "dmexcl_ptn": False,
         "paths": PVPaths.defaults(),
         "scripts": pv_cfg.scripts,
-        "files": pv_cfg.files,
+        "jobs": pv_cfg.jobs,
     }
     values.update(overrides)
     return PVConfig(**values)
@@ -113,6 +113,16 @@ class TestPVStages(unittest.TestCase):
             [task["name"] for task in stage["tasks"]],
             ["DRC", "DRC_BE"],
         )
+
+    def test_post_gds2oas_drc_lvs_use_top_out_gds_when_oasii_off(self):
+        settings = {"USE_OASII": "0", "FLAG_LVS": "1"}
+        stage = build_post_gds2oas_stage(settings, sample_config())
+        self.assertEqual(stage["name"], "DRC")
+        drc = next(t for t in stage["tasks"] if t["name"] == "DRC")["jobs"][0]
+        lvs = next(t for t in stage["tasks"] if t["name"] == "LVS")["jobs"][0]
+        self.assertEqual(drc["inputs"], ["../GDS/sm8466_top.gds.gz"])
+        self.assertIn("../GDS/sm8466_top.gds.gz", lvs["inputs"])
+        self.assertNotIn("../GDS/sm8466_top.oas", lvs["inputs"])
 
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@ def sample_config(**overrides):
         "dmexcl_ptn": False,
         "paths": PVPaths.defaults(),
         "scripts": pv_cfg.scripts,
-        "files": pv_cfg.files,
+        "jobs": pv_cfg.jobs,
     }
     values.update(overrides)
     return PVConfig(**values)
@@ -37,7 +37,7 @@ class TestPVSpiRcxtLvs(unittest.TestCase):
         self.assertEqual(job["command"], "../flow/run_spi.sh")
         self.assertEqual(
             job["inputs"],
-            ["sm8466_top.spi", "../DATA/netlist.pg.v.gz"],
+            ["../DATA/ref.spi", "../DATA/netlist.pg.v.gz"],
         )
         self.assertEqual(job["outputs"], ["../spi/sm8466_top.cdl"])
 
@@ -67,6 +67,25 @@ class TestPVSpiRcxtLvs(unittest.TestCase):
         )
         self.assertEqual(len(stage["tasks"]), 1)
 
+    def test_stream_out_top_includes_gds2oas_by_default(self):
+        stage = stream_out_top_stage(
+            sample_config(),
+            ["../LakerBZ/create_text_from_APRgds.tcl"],
+            {},
+        )
+        names = [job["name"] for job in stage["tasks"][0]["jobs"]]
+        self.assertIn("gds2oas", names)
+
+    def test_stream_out_top_omits_gds2oas_when_use_oasii_off(self):
+        stage = stream_out_top_stage(
+            sample_config(),
+            ["../LakerBZ/create_text_from_APRgds.tcl"],
+            {"USE_OASII": "0"},
+        )
+        names = [job["name"] for job in stage["tasks"][0]["jobs"]]
+        self.assertNotIn("gds2oas", names)
+        self.assertEqual(names[-1], "sm8466_top_Out")
+
     def test_lvs_task_command_inputs_outputs(self):
         task = lvs_task(sample_config())
         job = task["jobs"][0]
@@ -75,14 +94,24 @@ class TestPVSpiRcxtLvs(unittest.TestCase):
         self.assertEqual(
             job["inputs"],
             [
-                "hcell",
-                "lvs.calibre",
-                "layout.spi",
+                "../DATA/hcell",
                 "../GDS/sm8466_top.oas",
                 "../spi/sm8466_top.cdl",
             ],
         )
         self.assertEqual(job["outputs"], ["lvs.rep"])
+
+    def test_lvs_task_uses_top_out_gds_when_oasii_off(self):
+        task = lvs_task(sample_config(), {"USE_OASII": "0"})
+        job = task["jobs"][0]
+        self.assertEqual(
+            job["inputs"],
+            [
+                "../DATA/hcell",
+                "../GDS/sm8466_top.gds.gz",
+                "../spi/sm8466_top.cdl",
+            ],
+        )
 
 
 if __name__ == "__main__":

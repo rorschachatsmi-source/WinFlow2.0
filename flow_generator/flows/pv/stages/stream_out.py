@@ -9,6 +9,11 @@ from flow_generator.flows.pv.config import PVConfig, flag_enabled
 from flow_generator.flows.pv.stages.spi_rcxt_lvs import rcxt_task
 
 
+def _use_oasii(settings: Dict[str, str]) -> bool:
+    """Include gds2oas unless USE_OASII is explicitly disabled (default on)."""
+    return settings.get("USE_OASII", "1") == "1"
+
+
 def stream_out_top_stage(
     config: PVConfig,
     laker_outputs: List[str],
@@ -17,40 +22,43 @@ def stream_out_top_stage(
     paths = config.paths
     scripts = config.scripts
     top = config.top
-    final_top = config.final_top
 
-    main_task = make_task(
-        f"{top}_streamOut_TOP",
-        [
-            make_job(
-                "laker_topLib",
-                f"{paths.flow_dir}/{scripts.laker_topLib}",
-                laker_outputs,
-                [f"{paths.laker_dir}/{final_top}_LIB.blitz++"],
-                config.queue,
-                config.cpu,
-            ),
-            make_job(
-                f"{top}_Out",
-                f"{paths.flow_dir}/{scripts.bzgdsout_top}",
-                [
-                    f"{paths.laker_dir}/{final_top}_LIB.blitz++",
-                    f"{paths.gds_dir}/{top}_FULL.gds.gz",
-                ],
-                [f"{paths.gds_dir}/{final_top}.gds.gz"],
-                config.queue,
-                config.cpu,
-            ),
+    _, top_lib_out = config.job_io("laker_topLib")
+    top_out_in, top_out_out = config.job_io("top_Out")
+
+    jobs = [
+        make_job(
+            "laker_topLib",
+            f"{paths.flow_dir}/{scripts.laker_topLib}",
+            # Dynamic merge outputs (blitz + text + tcl), not the static node sample.
+            laker_outputs,
+            top_lib_out,
+            config.queue,
+            config.cpu,
+        ),
+        make_job(
+            f"{top}_Out",
+            f"{paths.flow_dir}/{scripts.bzgdsout_top}",
+            top_out_in,
+            top_out_out,
+            config.queue,
+            config.cpu,
+        ),
+    ]
+    if _use_oasii(settings):
+        gds_in, gds_out = config.job_io("gds2oas")
+        jobs.append(
             make_job(
                 "gds2oas",
                 f"{paths.flow_dir}/{scripts.gds2oas}",
-                [f"{paths.gds_dir}/{final_top}.gds.gz"],
-                [f"{paths.gds_dir}/{final_top}.oas"],
+                gds_in,
+                gds_out,
                 config.queue,
                 config.cpu,
-            ),
-        ],
-    )
+            )
+        )
+
+    main_task = make_task(f"{top}_streamOut_TOP", jobs)
 
     tasks = [main_task]
     if flag_enabled(settings, "FLAG_RCXT"):

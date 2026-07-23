@@ -1,0 +1,24 @@
+{
+  "flow_name": "custom_flow",
+  "poll_interval": 20,
+  "stages": [
+    {
+      "name": "stage_1",
+      "tasks": [
+        {
+          "name": "task_1",
+          "jobs": [
+            {
+              "name": "job_1",
+              "command": "",
+              "queue": "tpdsd1",
+              "cpu": 1,
+              "inputs": [],
+              "outputs": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

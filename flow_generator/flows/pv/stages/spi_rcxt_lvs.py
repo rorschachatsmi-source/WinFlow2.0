@@ -2,44 +2,47 @@
 
 from __future__ import annotations
 
-from flow_generator.core.models import Stage, Task, make_job, make_stage, make_task
+from typing import Dict, List, Optional
+
+from flow_generator.core.models import Stage, Task, make_job, make_task
 from flow_generator.flows.pv.config import PVConfig
 
 
-def spi_input_spi_path(config: PVConfig) -> str:
-    return config.files.spi_input_spi.format(top=config.top)
+def _use_oasii(settings: Dict[str, str]) -> bool:
+    return settings.get("USE_OASII", "1") == "1"
 
 
-def spi_input_netlist_path(config: PVConfig) -> str:
-    return f"{config.paths.data_dir}/{config.files.spi_input_netlist}"
+def _layout_input_for_verify(config: PVConfig, settings: Dict[str, str]) -> str:
+    """Layout file DRC/LVS wait on: OAS from gds2oas, or GDS from top_Out."""
+    if _use_oasii(settings):
+        _ins, outs = config.job_io("gds2oas")
+        return outs[0]
+    _ins, outs = config.job_io("top_Out")
+    return outs[0]
 
 
-def spi_output_path(config: PVConfig) -> str:
-    filename = config.files.spi_output.format(top=config.top)
-    return f"{config.paths.spi_dir}/{filename}"
-
-
-def dm_gds_path(config: PVConfig) -> str:
-    return f"{config.paths.gds_dir}/DM.gds"
-
-
-def rcxt_output_path(config: PVConfig) -> str:
-    return config.files.rcxt_output
+def _rewrite_layout_inputs(
+    inputs: List[str],
+    config: PVConfig,
+    settings: Dict[str, str],
+) -> List[str]:
+    if _use_oasii(settings):
+        return list(inputs)
+    # Swap OAS layout paths for top_Out GDS so edges hang off *_Out.
+    layout = _layout_input_for_verify(config, settings)
+    return [layout if path.endswith(".oas") else path for path in inputs]
 
 
 def spi_task(config: PVConfig) -> Task:
-    paths = config.paths
+    inputs, outputs = config.job_io("SPI")
     return make_task(
         "SPI",
         [
             make_job(
                 "SPI",
-                f"{paths.flow_dir}/{config.scripts.spi}",
-                [
-                    spi_input_spi_path(config),
-                    spi_input_netlist_path(config),
-                ],
-                [spi_output_path(config)],
+                f"{config.paths.flow_dir}/{config.scripts.spi}",
+                inputs,
+                outputs,
                 config.queue,
                 config.cpu,
             )
@@ -54,15 +57,15 @@ def add_spi_task(stage: Stage, config: PVConfig) -> Stage:
 
 
 def rcxt_task(config: PVConfig) -> Task:
-    paths = config.paths
+    inputs, outputs = config.job_io("RCXT")
     return make_task(
         "RCXT",
         [
             make_job(
                 "RCXT",
-                f"{paths.flow_dir}/{config.scripts.rcxt}",
-                [dm_gds_path(config)],
-                [rcxt_output_path(config)],
+                f"{config.paths.flow_dir}/{config.scripts.rcxt}",
+                inputs,
+                outputs,
                 config.queue,
                 config.cpu,
             )
@@ -70,32 +73,18 @@ def rcxt_task(config: PVConfig) -> Task:
     )
 
 
-def lvs_oas_input(config: PVConfig) -> str:
-    return f"{config.paths.gds_dir}/{config.final_top}.oas"
-
-
-def lvs_cdl_input(config: PVConfig) -> str:
-    filename = config.files.spi_output.format(top=config.top)
-    return f"{config.paths.spi_dir}/{filename}"
-
-
-def lvs_task(config: PVConfig) -> Task:
-    paths = config.paths
-    files = config.files
+def lvs_task(config: PVConfig, settings: Optional[Dict[str, str]] = None) -> Task:
+    settings = settings or {}
+    inputs, outputs = config.job_io("LVS")
+    inputs = _rewrite_layout_inputs(inputs, config, settings)
     return make_task(
         "LVS",
         [
             make_job(
                 "LVS",
-                f"{paths.flow_dir}/{config.scripts.lvs}",
-                [
-                    files.lvs_hcell,
-                    files.lvs_calibre,
-                    files.lvs_layout_spi,
-                    lvs_oas_input(config),
-                    lvs_cdl_input(config),
-                ],
-                [files.lvs_report],
+                f"{config.paths.flow_dir}/{config.scripts.lvs}",
+                inputs,
+                outputs,
                 config.queue,
                 config.cpu,
             )

@@ -1,0 +1,29 @@
+{
+  "flow_name": "PV",
+  "poll_interval": 20,
+  "stages": [
+    {
+      "name": "stage_1",
+      "tasks": [
+        {
+          "name": "task_1",
+          "jobs": [
+            {
+              "name": "TOP_MODULE_Out",
+              "command": "../flow/bzgdsout_top.sh",
+              "queue": "tpdsd1",
+              "cpu": 4,
+              "inputs": [
+                "../LakerBZ/TOP_MODULE_LIB.blitz++",
+                "../GDS/TOP_MODULE_FULL.gds.gz"
+              ],
+              "outputs": [
+                "../GDS/TOP_MODULE.gds.gz"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

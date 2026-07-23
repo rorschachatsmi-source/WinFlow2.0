@@ -1,0 +1,26 @@
+{
+  "flow_name": "APR",
+  "poll_interval": 20,
+  "stages": [
+    {
+      "name": "stage_1",
+      "tasks": [
+        {
+          "name": "task_1",
+          "jobs": [
+            {
+              "name": "02_prects_opt",
+              "command": "./run_stage 02_prects_opt",
+              "queue": "tpdsd1",
+              "cpu": 4,
+              "inputs": [],
+              "outputs": [
+                "02_prects_opt/DB/02_prects_opt.enc.dat"
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

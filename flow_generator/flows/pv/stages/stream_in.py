@@ -9,13 +9,11 @@ from flow_generator.flows.pv.config import PVConfig
 
 
 def block_blitz_outputs(blocks: List[Dict[str, str]], config: PVConfig) -> List[str]:
-    paths = config.paths
-    return [f"{paths.laker_dir}/{block['name']}.blitz++" for block in blocks]
-
-
-def _apr_gds_input(config: PVConfig) -> str:
-    paths = config.paths
-    return f"{paths.data_dir}/{config.files.apr_gds}"
+    tmpl = config.jobs["sub_laker"].resolved()[1][0]
+    return [
+        config.io(tmpl, block=block["name"], workdir=block["workdir"])
+        for block in blocks
+    ]
 
 
 def stream_in_sub_stage(
@@ -29,17 +27,20 @@ def stream_in_sub_stage(
     scripts = config.scripts
     tasks = []
     for block in blocks:
+        name = block["name"]
+        workdir = block["workdir"]
+        inputs, outputs = config.job_io("sub_laker", block=name, workdir=workdir)
         jobs = [
             make_job(
-                name=f"{block['name']}_laker",
-                command=f"{paths.flow_dir}/{scripts.sub_bzgdsin_apr} {block['name']} {block['workdir']}",
-                inputs=[f"{block['workdir']}/GDS/{block['name']}.gds.gz"],
-                outputs=[f"{paths.laker_dir}/{block['name']}.blitz++"],
+                name=f"{name}_laker",
+                command=f"{paths.flow_dir}/{scripts.sub_bzgdsin_apr} {name} {workdir}",
+                inputs=inputs,
+                outputs=outputs,
                 queue=config.queue,
                 cpu=config.cpu,
             )
         ]
-        tasks.append(make_task(block["name"], jobs))
+        tasks.append(make_task(name, jobs))
 
     return make_stage("streamIn_sub", tasks)
 
@@ -50,29 +51,32 @@ def stream_in_sub_dummy_stage(
 ) -> Stage:
     paths = config.paths
     scripts = config.scripts
-    files = config.files
     tasks = []
 
     for block in blocks:
+        name = block["name"]
+        workdir = block["workdir"]
+        cal_in, cal_out = config.job_io("sub_calibre", block=name, workdir=workdir)
+        lak_in, lak_out = config.job_io("sub_laker_dummy", block=name, workdir=workdir)
         jobs = [
             make_job(
-                name=f"{block['name']}_calibre",
-                command=f"{paths.flow_dir}/{scripts.sub_calibre_dm} {block['name']} {block['workdir']}",
-                inputs=[f"{paths.laker_dir}/{files.sub_dmexcl_calibre}"],
-                outputs=[f"{paths.laker_dir}/{block['name']}_dummy.gds.gz"],
+                name=f"{name}_calibre",
+                command=f"{paths.flow_dir}/{scripts.sub_calibre_dm} {name} {workdir}",
+                inputs=cal_in,
+                outputs=cal_out,
                 queue=config.queue,
                 cpu=config.cpu,
             ),
             make_job(
-                name=f"{block['name']}_laker",
-                command=f"{paths.flow_dir}/{scripts.sub_bzgdsin_apr} {block['name']} dummy",
-                inputs=[f"{paths.laker_dir}/{block['name']}_dummy.gds.gz"],
-                outputs=[f"{paths.laker_dir}/{block['name']}.blitz++"],
+                name=f"{name}_laker",
+                command=f"{paths.flow_dir}/{scripts.sub_bzgdsin_apr} {name} dummy",
+                inputs=lak_in,
+                outputs=lak_out,
                 queue=config.queue,
                 cpu=config.cpu,
             ),
         ]
-        tasks.append(make_task(f"{block['name']}_dummy", jobs))
+        tasks.append(make_task(f"{name}_dummy", jobs))
 
     return make_stage("streamIn_sub_dummy", tasks)
 
@@ -86,12 +90,10 @@ def stream_in_apr_stage(
     paths = config.paths
     scripts = config.scripts
     top = config.top
-    if input_from_stream_out:
-        inputs = [f"{paths.gds_dir}/{top}_FULL.gds.gz"]
-    else:
-        inputs = [_apr_gds_input(config)]
-        if extra_inputs:
-            inputs.extend(extra_inputs)
+    job_key = "laker_In_from_stream_out" if input_from_stream_out else "laker_In"
+    inputs, outputs = config.job_io(job_key)
+    if not input_from_stream_out and extra_inputs:
+        inputs = list(inputs) + list(extra_inputs)
     return make_stage(
         "streamIn_APR",
         [
@@ -102,7 +104,7 @@ def stream_in_apr_stage(
                         name="laker_In",
                         command=f"{paths.flow_dir}/{scripts.bzgdsin_apr}",
                         inputs=inputs,
-                        outputs=[f"{paths.laker_dir}/{top}_APR.blitz++"],
+                        outputs=outputs,
                         queue=config.queue,
                         cpu=config.cpu,
                     )
@@ -119,7 +121,8 @@ def pre_stream_in_apr_stage(
     paths = config.paths
     scripts = config.scripts
     top = config.top
-    inputs = [_apr_gds_input(config)] + block_blitz_outputs(blocks, config)
+    inputs, outputs = config.job_io("laker_pre_In")
+    inputs = list(inputs) + block_blitz_outputs(blocks, config)
     return make_stage(
         "pre_streamIn_APR",
         [
@@ -130,7 +133,7 @@ def pre_stream_in_apr_stage(
                         name="laker_pre_In",
                         command=f"{paths.flow_dir}/{scripts.pre_bzgdsin_apr}",
                         inputs=inputs,
-                        outputs=[f"{paths.laker_dir}/{top}_APR.blitz++"],
+                        outputs=outputs,
                         queue=config.queue,
                         cpu=config.cpu,
                     )
@@ -144,6 +147,7 @@ def stream_out_apr_stage(config: PVConfig) -> Stage:
     paths = config.paths
     scripts = config.scripts
     top = config.top
+    inputs, outputs = config.job_io("laker_Out")
     return make_stage(
         "streamOut_APR",
         [
@@ -153,8 +157,8 @@ def stream_out_apr_stage(config: PVConfig) -> Stage:
                     make_job(
                         name="laker_Out",
                         command=f"{paths.flow_dir}/{scripts.bzgdsout_apr}",
-                        inputs=[f"{paths.laker_dir}/{top}_APR.blitz++"],
-                        outputs=[f"{paths.gds_dir}/{top}_FULL.gds.gz"],
+                        inputs=inputs,
+                        outputs=outputs,
                         queue=config.queue,
                         cpu=config.cpu,
                     )
