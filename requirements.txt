@@ -1,0 +1,6 @@
+# WinFlow 2.0 — Python standard library only (no pip packages).
+# Requires: Python 3.9.2 or newer (Tkinter for GUIs).
+#
+# Install nothing via pip. Run with:
+#   python3.9 flow_runner_core.py flow.json
+#   python3.9 winflow_gui.py

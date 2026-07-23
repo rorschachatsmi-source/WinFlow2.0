@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from winflow_config.models import PVPathsConfig
@@ -22,7 +22,11 @@ class PVPaths:
         return cls.from_settings({})
 
     @classmethod
-    def from_settings(cls, settings: dict, defaults: "PVPathsConfig | None" = None) -> "PVPaths":
+    def from_settings(
+        cls,
+        settings: dict,
+        defaults: Optional["PVPathsConfig"] = None,
+    ) -> "PVPaths":
         from winflow_config import get_config
 
         base = defaults or get_config().pv.paths

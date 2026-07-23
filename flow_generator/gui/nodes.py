@@ -122,12 +122,20 @@ def write_node(
     stem = filename or job["name"]
     path = root / f"{stem}.json"
     gen_cfg = get_config().generator
+    # Node library entries are reusable job templates — omit runner DAG attrs
+    # so files stay the same shape as before parents/children scheduling.
+    from flow_graph import strip_job_relations
+
+    job_copy = dict(job)
+    job_copy.pop("parents", None)
+    job_copy.pop("children", None)
     flow = _wrap_job_as_flow(
-        job,
+        job_copy,  # type: ignore[arg-type]
         flow_name=flow_name or gen_cfg.blank_flow_name,
         poll_interval=gen_cfg.poll_interval,
     )
-    write_flow(flow, path)
+    strip_job_relations(flow["stages"])
+    write_flow(flow, path, annotate=False)
     return path
 
 

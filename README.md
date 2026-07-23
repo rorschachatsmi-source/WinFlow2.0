@@ -1,26 +1,26 @@
 # WinFlow 2.0
 
-WinFlow is a lightweight **EDA flow runner** for LSF clusters. You describe a design flow as JSON (stages, tasks, jobs, and file dependencies); WinFlow submits jobs with `bsub`, polls status with `bjobs`, validates inputs/outputs, and optionally visualizes progress in a Tkinter GUI.
+WinFlow is a lightweight **EDA flow runner** for LSF clusters. You describe a design flow as JSON (stages/tasks as tags, jobs with `parents` / `children`, inputs, and outputs); WinFlow submits jobs with `bsub`, polls status with `bjobs`, validates inputs/outputs, and optionally visualizes progress in a Tkinter GUI.
 
 A companion **flow generator** package builds `flow.json` from domain inputs (`setting.sh`, `block_stream.list`) for PV (physical verification) and APR (place-and-route) flows, with a visual editor to export runnable JSON.
 
 ## Features
 
-- **Declarative flows** — JSON config with stages, tasks, jobs, inputs, outputs, queue, and CPU count
+- **Declarative flows** — JSON config with stages, tasks, jobs, `parents` / `children`, inputs, outputs, queue, and CPU count
 - **Centralized configuration** — site defaults in `config.json`, optional `WINFLOW_`* environment overrides
 - **Flow generator** — CLI and GUI to build PV/APR flows from project settings
-- **Dependency tracking** — job DAG inferred from shared input/output paths
+- **Parent/child DAG scheduling** — ready jobs (all parents DONE) run in parallel; stage/task are organizational tags
 - **LSF integration** — `bsub` / `bjobs` / `bkill` with per-job logs
 - **CLI runner** — `flow_runner_core.py` for headless execution
 - **Runner GUI** — DAG view, live status, log tailing, stop/rerun failed jobs
-- **Generator GUI** — visual flow editor with Blank / PV / APR templates
+- **Generator GUI** — visual flow editor; link/unlink edits `parents` / `children`
 
 ## Requirements
 
 
 | Component   | Notes                                   |
 | ----------- | --------------------------------------- |
-| Python 3.9+ | Standard library only (no pip packages) |
+| Python 3.9.2+ | Standard library only (no pip packages); tested on 3.9 |
 | LSF         | `bsub`, `bjobs`, `bkill` on `PATH`      |
 | Tkinter     | For GUIs; usually bundled with Python   |
 | C shell     | Example scripts use `#!/bin/csh`        |
@@ -102,9 +102,11 @@ WinFlow2.0/
 ├── flow_runner_core.py         # Core engine + CLI entry point
 ├── flow_runner_gui.py          # Runner Tkinter GUI (standalone or tab)
 ├── winflow_gui.py              # Unified Runner + Generator notebook GUI
+├── winflow_icon.py             # Window icon helper (Linux PNG via iconphoto)
+├── assets/                     # App icons (PNG) + Linux .desktop template
 ├── flow_generator.py           # Thin wrapper → flow_generator.cli
 ├── flow_generator_gui.py       # Visual flow editor (standalone or tab)
-├── flow_graph.py               # Shared DAG layout (runner + generator GUIs)
+├── flow_graph.py               # Shared parents/children DAG helpers + layout
 ├── flow.json                   # Active flow config (default for runners)
 ├── flow_generator/             # Flow generation package
 │   ├── cli.py                  # Generator CLI
@@ -129,7 +131,7 @@ WinFlow uses a **two-tier configuration model**:
 | Tier              | Source                                         | Purpose                                                                                   |
 | ----------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------- |
 | **Site defaults** | `config.json` + `WINFLOW_`* env vars           | Queue names, paths, poll intervals, script names — values that change per cluster or site |
-| **Per-design**    | `setting.sh`, `block_stream.list`, `flow.json` | Design-specific module names, flags, job commands, and file dependencies                  |
+| **Per-design**    | `setting.sh`, `block_stream.list`, `flow.json` | Design-specific module names, flags, job commands, I/O paths, and `parents` / `children` |
 
 
 ### Loading order
@@ -329,25 +331,35 @@ flowchart TB
 | **Stage decomposition** | `flow_generator/flows/*/stages/`                | Each stage is a pure function returning a `Stage` dict                                              |
 | **Factory**             | `create_flow_runner()` in `flow_runner_core.py` | Wires `FlowLogger`, `FlowValidator`, and `LSFJobManager`                                            |
 | **Document model**      | `flow_generator/gui/document.py`                | Editable `FlowDocument` with canvas positions, converted to runner-compatible JSON                  |
-| **Shared DAG**          | `flow_graph.py`                                 | Edge construction and layer layout used by both GUIs                                                |
+| **Shared DAG**          | `flow_graph.py`                                 | `parents` / `children` edges, annotation helpers, and layer layout for both GUIs |
 
 
 ### Execution model
 
+Jobs are scheduled **only** from each job’s `parents` / `children` attributes (keys are `stage/task/job`).
 
-| Level                     | Runs         | Notes                                            |
-| ------------------------- | ------------ | ------------------------------------------------ |
-| **Stage**                 | Sequentially | Stage *N+1* starts only after stage *N* finishes |
-| **Task** (within a stage) | In parallel  | One thread per task                              |
-| **Job** (within a task)   | Sequentially | Jobs run in list order                           |
+| Concept | Role |
+| ------- | ---- |
+| **Job** | Unit of LSF work. A job becomes ready when every parent is DONE (or skipped on Rerun). Ready jobs may run in parallel. |
+| **Stage / task** | Tags for identity, logging, and editor grouping. They do **not** control run order or concurrency. |
+| **inputs / outputs** | Safety checks at job start/end (paths must exist). They do **not** schedule jobs. |
 
+When a flow is generated (or an older `flow.json` is missing relation fields), WinFlow **seeds** `parents` / `children` from:
 
-The GUI builds a **job-level DAG** from `inputs` / `outputs`:
+1. Consecutive jobs in the same task (task order)
+2. Matching file paths (`outputs` → `inputs`)
 
-- Jobs in the same task are chained in order.
-- A job that lists a file as `input` depends on whichever job last produced that file.
+After that, the generator GUI **Link / Unlink** edits the attributes directly (and can auto-fill stage/task tags and file I/O). Canvas layout and the runner DAG view follow `parents` / `children` only.
 
-> **Note:** The runner schedules by stage/task/job list order and file-existence checks. Cross-task file dependencies shown in the DAG are visual only — the runner does not wait on them automatically.
+```mermaid
+flowchart LR
+  Roots[Jobs with empty parents] --> Pool[Thread pool]
+  Pool --> Done[Mark DONE]
+  Done --> Unlock[Unlock children]
+  Unlock --> Pool
+```
+
+> **Note:** Legacy flows without `parents` / `children` are annotated automatically at run time. Export from the editor preserves your link/unlink edits and does not re-seed over them.
 
 ### Adding a new flow type
 
@@ -379,18 +391,22 @@ Top-level keys:
 | `poll_interval` | no       | `20` (from `config.json`) | Seconds between `bjobs` polls |
 
 
-Each **stage** has `name` and `tasks`. Each **task** has `name` and `jobs`. Each **job** has:
+Each **stage** has `name` and `tasks` (organizational tags). Each **task** has `name` and `jobs`. Each **job** has:
 
 
-| Key       | Required | Default                       | Description                                               |
-| --------- | -------- | ----------------------------- | --------------------------------------------------------- |
-| `name`    | yes      | —                             | Template name (LSF job name gets a user/timestamp suffix) |
-| `command` | yes      | —                             | Shell command submitted to LSF                            |
-| `inputs`  | yes      | —                             | Paths that must exist before submission                   |
-| `outputs` | yes      | —                             | Paths that must exist after `DONE`                        |
-| `queue`   | no       | `tpdsd1` (from `config.json`) | LSF queue                                                 |
-| `cpu`     | no       | `4` (from `config.json`)      | CPU count (`bsub -n`)                                     |
-| `machine` | no       | —                             | Space-separated host list for `bsub -m`                   |
+| Key        | Required | Default                       | Description                                                                 |
+| ---------- | -------- | ----------------------------- | --------------------------------------------------------------------------- |
+| `name`     | yes      | —                             | Template name (LSF job name gets a user/timestamp suffix)                  |
+| `command`  | yes      | —                             | Shell command submitted to LSF                                             |
+| `inputs`   | yes      | —                             | Paths that must exist before submission                                    |
+| `outputs`  | yes      | —                             | Paths that must exist after `DONE`                                         |
+| `parents`  | no*      | seeded if missing             | List of parent job keys (`stage/task/job`); drives scheduling              |
+| `children` | no*      | seeded if missing             | List of child job keys (`stage/task/job`); kept mutual with `parents`      |
+| `queue`    | no       | `tpdsd1` (from `config.json`) | LSF queue                                                                  |
+| `cpu`      | no       | `4` (from `config.json`)      | CPU count (`bsub -n`)                                                      |
+| `machine`  | no       | —                             | Space-separated host list for `bsub -m`                                    |
+
+\*Generated and exported flows include `parents` / `children`. Older files without them are annotated at generate/run time.
 
 
 Example (abbreviated):
@@ -412,7 +428,9 @@ Example (abbreviated):
               "queue": "tpdsd1",
               "cpu": 1,
               "inputs": ["example_flow/input.txt"],
-              "outputs": ["temp.txt"]
+              "outputs": ["temp.txt"],
+              "parents": [],
+              "children": ["processing/task_1/process_part_1_1"]
             }
           ]
         }
@@ -465,7 +483,7 @@ blk2 /work/design/blk2
 
 ### PV default flow jobs
 
-The generated PV flow includes optional jobs controlled by `setting.sh` flags. WinFlow schedules them using stage/task parallelism (tasks in the same stage run in parallel; stages run sequentially).
+The generated PV flow includes optional jobs controlled by `setting.sh` flags. WinFlow schedules them from each job’s `parents` / `children` (seeded at generate time from task order and file links). Jobs with no unfinished parents may run in parallel regardless of stage/task tags.
 
 | Job | Flag | Command | Inputs | Output | Placement |
 | --- | ---- | ------- | ------ | ------ | --------- |
@@ -482,7 +500,7 @@ After `gds2oas` completes, a final verification stage is added:
 | **DRC** | `FLAG_DRC=1`, or both `FLAG_DRCBE=0` and `FLAG_DRCFE=0` |
 | **Verify** | `FLAG_DRCBE=1` and/or `FLAG_DRCFE=1` while `FLAG_DRC=0` |
 
-Tasks within that stage (all parallel):
+Tasks within that stage (typically independent roots after seeding, so they can run in parallel):
 
 | Task | Condition |
 | ---- | --------- |
@@ -505,7 +523,7 @@ Tasks within that stage (all parallel):
 
 ## Bundled example flow
 
-The `example_flow/` directory contains a minimal demo pipeline (validation → parallel processing → merge). Scripts are referenced from a hand-written `flow.json` or can be used as a starting point for custom flows.
+The `example_flow/` directory contains a minimal demo pipeline (validation → parallel processing → merge). Scripts are referenced from a hand-written `flow.json` or can be used as a starting point for custom flows. After generate/export, jobs carry `parents` / `children` so parallel branches (e.g. `task_1` vs `task_2`) run when ready.
 
 
 | Stage          | Task            | Job              | What it does                                  |
@@ -542,6 +560,8 @@ The runner GUI **Reset Flow** button clears log files under both log directories
 | **Runner / Generator tabs** | Switch between run view and visual editor                           |
 | **Sync from Generator**  | Top bar (next to Browse): apply Generator’s in-memory flow into Runner; writes `flow.json`, resets all job statuses; disabled while any job is running / RUN / KILLING |
 
+Window icons use PNG under `assets/` via Tk `iconphoto` (works on Linux/X11). For a desktop launcher, copy `assets/winflow.desktop.in` to `~/.local/share/applications/winflow.desktop` and replace the absolute `Exec=` / `Icon=` paths.
+
 
 ### Runner GUI (`flow_runner_gui.py`)
 
@@ -551,7 +571,7 @@ The runner GUI **Reset Flow** button clears log files under both log directories
 | **Run Flow**       | Execute the loaded config from the beginning                                   |
 | **Rerun**          | Resume from the first failed job, skipping completed jobs                      |
 | **Stop**           | `bkill` all tracked LSF jobs (retries per `kill_poll_ms` / `kill_max_retries`) |
-| **Job node click** | Open detail dialog: inputs/outputs, timing, stop, validate                     |
+| **Job node click** | Open detail dialog: Run Job, Stop Job, Validate, inputs/outputs, timing |
 | **Job Log tab**    | Tail active job logs; select a job from the dropdown                           |
 
 
@@ -561,18 +581,20 @@ The runner GUI **Reset Flow** button clears log files under both log directories
 | Control              | Action                                                    |
 | -------------------- | --------------------------------------------------------- |
 | **Add / Edit Job**   | Pick a predefined node from `flow_generator/node/*.json` (or blank), then edit |
-| **Drag nodes**       | Reorder jobs within a task and arrange the canvas         |
+| **Link / Unlink**    | Edit `parents` / `children`; auto-fills stage/task tags and file I/O when useful |
+| **Drag nodes**       | Arrange the canvas; auto-layout follows parent/child layers |
 | **Load Template**    | Load Blank, PV, or APR template with LSF resource options |
-| **Export flow.json** | Write the current document as runnable JSON               |
+| **Export flow.json** | Write the current document as runnable JSON (keeps relation edits) |
 
 
 ## Tests
 
 ```bash
-python -m unittest discover -s tests -v
+# Prefer the project Python (3.9.2+):
+python3.9 -m unittest discover -s tests -v
 ```
 
-Tests cover flow builders, CLI, parsers, config loading, LSF submit options, GUI document/graph helpers, and the shared DAG module.
+Tests cover flow builders, CLI, parsers, config loading, LSF submit options, GUI document/graph/deps helpers, parent/child DAG scheduling, and the shared DAG module.
 
 ## License
 

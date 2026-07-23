@@ -6,7 +6,13 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Set, Tuple
 
-from flow_graph import EDGE_TASK_ORDER, build_flow_graph_edges, compute_layers
+from flow_graph import (
+    EDGE_PARENT,
+    EDGE_TASK_ORDER,
+    build_relation_edges,
+    compute_layers,
+    ensure_job_relations,
+)
 from flow_generator.gui.document import FlowDocument, JobKey, _job_key
 
 
@@ -21,15 +27,22 @@ class JobGraph:
         return {(src, dst) for src, dst, _label in self.edges}
 
     def file_edges(self) -> List[Tuple[JobKey, JobKey, str]]:
-        return [(s, d, label) for s, d, label in self.edges if label != EDGE_TASK_ORDER]
+        return [
+            (s, d, label)
+            for s, d, label in self.edges
+            if label not in (EDGE_TASK_ORDER, EDGE_PARENT)
+        ]
 
     def task_order_edges(self) -> List[Tuple[JobKey, JobKey]]:
+        # Kept for compatibility; editor graph no longer invents task-order edges.
         return [(s, d) for s, d, label in self.edges if label == EDGE_TASK_ORDER]
 
 
 def build_job_graph(document: FlowDocument) -> JobGraph:
+    """Build canvas graph from job parents/children (seeded if missing)."""
+    ensure_job_relations(document.stages)
     graph = JobGraph()
-    graph.edges = build_flow_graph_edges(document.stages, key_fn=_job_key)
+    graph.edges = build_relation_edges(document.stages, key_fn=_job_key)
 
     for src, dst, _label in graph.edges:
         graph.parents[dst].append(src)
@@ -46,6 +59,7 @@ def build_job_graph(document: FlowDocument) -> JobGraph:
 
 
 def layout_by_graph(document: FlowDocument, graph: JobGraph, col_gap: int = 240, row_gap: int = 100) -> None:
+    """Place jobs by parent/child layer (left = roots, right = deeper dependents)."""
     by_layer: Dict[int, List[JobKey]] = defaultdict(list)
     for key, layer in graph.layers.items():
         by_layer[layer].append(key)

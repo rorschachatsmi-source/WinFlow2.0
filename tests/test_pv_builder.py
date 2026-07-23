@@ -176,14 +176,15 @@ class TestPVFlowBuilder(unittest.TestCase):
         self.assertEqual(
             lvs_job["inputs"],
             [
-                "hcell",
-                "lvs.calibre",
-                "layout.spi",
+                "../DATA/hcell",
                 "../GDS/sm8466_top.oas",
                 "../spi/sm8466_top.cdl",
             ],
         )
         self.assertEqual(lvs_job["outputs"], ["lvs.rep"])
+        # File deps + annotate_job_relations wire parents for DAG scheduling.
+        self.assertIn("streamOut_TOP/sm8466_top_streamOut_TOP/gds2oas", lvs_job["parents"])
+        self.assertIn("streamIn_APR/SPI/SPI", lvs_job["parents"])
 
     def test_drc_lvs_link_top_out_when_oasii_off(self):
         context = BuildContext(

@@ -11,6 +11,7 @@
     "kill_poll_ms": 15000,
     "kill_max_retries": 4,
     "log_tail_interval_sec": 0.5,
+    "job_log_view_lines": 100,
     "thread_join_timeout_sec": 1.0,
     "log_viewer": "gvim",
     "auto_load_delay_ms": 150
@@ -54,7 +55,7 @@
       "bzgdsout_top": "bzgdsout_top.sh",
       "gds2oas": "gds2oas.sh",
       "laker_text": "laker_text.sh",
-      "run_drc": "run_drc",
+      "run_drc": "run_drc.sh",
       "spi": "run_spi.sh",
       "rcxt": "run_rcxt.sh",
       "lvs": "run_lvs.sh"
@@ -89,7 +90,7 @@
         "outputs": ["{gds_dir}/{top}_FULL.gds.gz"]
       },
       "SPI": {
-        "inputs": ["{top}.spi", "{data_dir}/netlist.pg.v.gz"],
+        "inputs": ["{data_dir}/ref.spi", "{data_dir}/netlist.pg.v.gz"],
         "outputs": ["{spi_dir}/{top}.cdl"]
       },
       "RCXT": {
@@ -98,9 +99,7 @@
       },
       "LVS": {
         "inputs": [
-          "hcell",
-          "lvs.calibre",
-          "layout.spi",
+          "{data_dir}/hcell",
           "{gds_dir}/{final_top}.oas",
           "{spi_dir}/{top}.cdl"
         ],

@@ -2,14 +2,13 @@
 
 import unittest
 
-from flow_graph import EDGE_TASK_ORDER
 from flow_generator.core.models import make_flow, make_job, make_stage, make_task
 from flow_generator.gui.document import FlowDocument, _job_key, flow_to_document
 from flow_generator.gui.graph import build_job_graph
 
 
 class TestJobGraph(unittest.TestCase):
-    def test_builds_file_dependency_edges(self):
+    def test_builds_edges_from_parents_children(self):
         flow = make_flow(
             "demo",
             [
@@ -43,10 +42,14 @@ class TestJobGraph(unittest.TestCase):
         j1 = _job_key("s1", "t1", "j1")
         j2 = _job_key("s1", "t1", "j2")
         j3 = _job_key("s2", "t2", "j3")
-        self.assertIn((j1, j2, EDGE_TASK_ORDER), graph.edges)
-        self.assertTrue(any(src == j2 and dst == j3 for src, dst, _ in graph.edges))
+        self.assertIn(j1, graph.parents.get(j2, []))
+        self.assertIn(j2, graph.parents.get(j3, []))
+        # Layout layers follow parent depth.
+        self.assertEqual(graph.layers[j1], 0)
+        self.assertEqual(graph.layers[j2], 1)
+        self.assertEqual(graph.layers[j3], 2)
 
-    def test_task_order_edges_match_runner(self):
+    def test_task_order_seeded_into_parents_children(self):
         flow = make_flow(
             "demo",
             [
@@ -68,12 +71,12 @@ class TestJobGraph(unittest.TestCase):
         graph = build_job_graph(doc)
         j1 = _job_key("s1", "t1", "j1")
         j2 = _job_key("s1", "t1", "j2")
-        self.assertIn((j1, j2, EDGE_TASK_ORDER), graph.edges)
         self.assertIn(j1, graph.parents.get(j2, []))
+        # Edge label may be EDGE_PARENT when no shared file path on the relation.
+        self.assertTrue(any(src == j1 and dst == j2 for src, dst, _ in graph.edges))
 
     def test_position_changes_preserve_job_order_and_edges(self):
         from flow_generator.flows.apr.builder import build_apr_stage
-        from flow_generator.gui.document import FlowDocument
 
         stage = build_apr_stage(prefix="top", is_current=True)
         doc = FlowDocument(flow_name="APR", stages=[stage])

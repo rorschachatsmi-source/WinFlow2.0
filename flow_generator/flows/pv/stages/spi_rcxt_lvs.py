@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from flow_generator.core.models import Stage, Task, make_job, make_task
 from flow_generator.flows.pv.config import PVConfig
@@ -73,7 +73,7 @@ def rcxt_task(config: PVConfig) -> Task:
     )
 
 
-def lvs_task(config: PVConfig, settings: Dict[str, str] | None = None) -> Task:
+def lvs_task(config: PVConfig, settings: Optional[Dict[str, str]] = None) -> Task:
     settings = settings or {}
     inputs, outputs = config.job_io("LVS")
     inputs = _rewrite_layout_inputs(inputs, config, settings)

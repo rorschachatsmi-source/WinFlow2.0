@@ -13,12 +13,18 @@ import time
 import getpass
 import subprocess
 import logging
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Optional, Callable
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from typing import Dict, List, Optional, Callable, Set
 from dataclasses import dataclass
 from enum import Enum
 
 from winflow_config import get_config
+from flow_graph import (
+    annotate_job_relations,
+    default_job_key,
+    jobs_need_relation_annotation,
+    validate_job_relations,
+)
 
 
 class JobStatus(Enum):
@@ -43,44 +49,60 @@ class JobInfo:
 class FlowLogger:
     """Centralized logging for flow execution"""
 
-    def __init__(self, log_file: Optional[str] = None, callback: Optional[Callable] = None):
+    def __init__(
+        self,
+        log_file: Optional[str] = None,
+        callback: Optional[Callable] = None,
+        console: Optional[bool] = None,
+    ):
         """
         Initialize logger
-        
+
         Args:
             log_file: Optional file path for logging
             callback: Optional callback function for GUI integration
+            console: Write to stderr/stdout. Defaults to False when a GUI
+                callback is provided so the launch terminal stays free.
         """
         self.log_file = log_file
         self.callback = callback
+        if console is None:
+            console = callback is None
+        self.console = console
         self.logger = self._setup_logger()
 
     def _setup_logger(self) -> logging.Logger:
         """Setup logging configuration"""
         logger = logging.getLogger(get_config().runner.logger_name)
         logger.setLevel(logging.DEBUG)
+        # Avoid duplicate handlers when create_flow_runner is called again.
+        logger.handlers.clear()
+        logger.propagate = False
 
-        # Console handler
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
-        console_formatter = logging.Formatter(
-            "[%(levelname)s] %(asctime)s - %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S"
-        )
-        console_handler.setFormatter(console_formatter)
-        logger.addHandler(console_handler)
+        if self.console:
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.INFO)
+            console_formatter = logging.Formatter(
+                "[%(levelname)s] %(asctime)s - %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+            console_handler.setFormatter(console_formatter)
+            logger.addHandler(console_handler)
 
-        # File handler
         if self.log_file:
             os.makedirs(os.path.dirname(self.log_file) or ".", exist_ok=True)
             file_handler = logging.FileHandler(self.log_file)
             file_handler.setLevel(logging.DEBUG)
             file_formatter = logging.Formatter(
                 "[%(levelname)s] %(asctime)s - %(message)s",
-                datefmt="%Y-%m-%d %H:%M:%S"
+                datefmt="%Y-%m-%d %H:%M:%S",
             )
             file_handler.setFormatter(file_formatter)
             logger.addHandler(file_handler)
+
+        # GUI-only: keep logging module happy when neither console nor file is set.
+        if not logger.handlers:
+            logger.addHandler(logging.NullHandler())
 
         return logger
 
@@ -146,6 +168,12 @@ class FlowValidator:
                 "or rename stages so each name appears once."
             )
             return False
+
+        if not jobs_need_relation_annotation(config["stages"]):
+            rel_err = validate_job_relations(config["stages"])
+            if rel_err:
+                self.logger.error(rel_err)
+                return False
 
         return True
 
@@ -335,6 +363,8 @@ class FlowRunner:
         self.logger.info(f"[JOB] {job_name}")
         self.logger.debug(f"  Inputs: {job_inputs}")
         self.logger.debug(f"  Outputs: {job_outputs}")
+        self.logger.debug(f"  Parents: {job.get('parents') or []}")
+        self.logger.debug(f"  Children: {job.get('children') or []}")
 
         job_id = ""
         try:
@@ -401,68 +431,24 @@ class FlowRunner:
         )
         self.logger.info(f"[SUCCESS] {job_name}")
 
-    def run_task(
-        self,
-        flow_name: str,
-        stage_name: str,
-        task: Dict,
-        poll_interval: int,
-        job_filter: Optional[Callable[[str], bool]] = None,
-    ):
-        """Execute a task (may contain multiple jobs)"""
-        task_name = task["name"]
-        self.logger.info(f"[TASK START] {task_name}")
-
-        for job in task["jobs"]:
-            self.run_job(
-                flow_name, stage_name, task_name, job, poll_interval, job_filter
-            )
-
-        self.logger.info(f"[TASK END] {task_name}")
-
-    def run_stage(
-        self,
-        flow_name: str,
-        stage: Dict,
-        poll_interval: int,
-        job_filter: Optional[Callable[[str], bool]] = None,
-    ):
-        """Execute a stage (may contain multiple tasks in parallel)"""
-        stage_name = stage["name"]
-        self.logger.info(f"[STAGE START] {stage_name}")
-
-        tasks = stage.get("tasks") or []
-        if not tasks:
-            self.logger.info(f"[STAGE END] {stage_name} (no tasks)")
-            return
-
-        # Submit every task immediately; surface the first failure via as_completed
-        # so a sibling that dies on missing inputs is not hidden until others finish.
-        with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
-            futures = [
-                pool.submit(
-                    self.run_task,
-                    flow_name,
-                    stage_name,
-                    task,
-                    poll_interval,
-                    job_filter,
-                )
-                for task in tasks
-            ]
-            for future in as_completed(futures):
-                future.result()
-
-        self.logger.info(f"[STAGE END] {stage_name}")
-
     def run_flow(
         self,
         config: Dict,
         job_filter: Optional[Callable[[str], bool]] = None,
     ):
-        """Execute complete flow"""
+        """Execute complete flow via parents/children DAG scheduling."""
         if not self.validator.validate_config(config):
             raise RuntimeError("Invalid flow configuration")
+
+        stages = config["stages"]
+        if jobs_need_relation_annotation(stages):
+            self.logger.info("Annotating missing parents/children from task order and file links")
+            annotate_job_relations(stages)
+            # Re-check relations after migration annotate.
+            rel_err = validate_job_relations(stages)
+            if rel_err:
+                self.logger.error(rel_err)
+                raise RuntimeError(f"Invalid flow configuration: {rel_err}")
 
         flow_name = config["flow_name"]
         poll_interval = config.get("poll_interval", self.job_manager.config.runner.poll_interval)
@@ -470,13 +456,121 @@ class FlowRunner:
         self.logger.info(f"[FLOW START] {flow_name}")
 
         try:
-            for stage in config["stages"]:
-                self.run_stage(flow_name, stage, poll_interval, job_filter)
-
+            self._run_dag(flow_name, stages, poll_interval, job_filter)
             self.logger.info(f"[FLOW SUCCESS] {flow_name}")
         except Exception as e:
             self.logger.error(f"[FLOW FAILED] {flow_name}: {str(e)}")
             raise
+
+    def _run_dag(
+        self,
+        flow_name: str,
+        stages: List[dict],
+        poll_interval: int,
+        job_filter: Optional[Callable[[str], bool]] = None,
+    ):
+        """Schedule all jobs by parents/children readiness."""
+        job_map: Dict[str, tuple] = {}
+        parents_of: Dict[str, List[str]] = {}
+        children_of: Dict[str, List[str]] = {}
+
+        for stage in stages:
+            stage_name = stage["name"]
+            for task in stage.get("tasks", []):
+                task_name = task["name"]
+                for job in task.get("jobs", []):
+                    key = default_job_key(stage_name, task_name, job["name"])
+                    job_map[key] = (stage_name, task_name, job)
+                    parents_of[key] = list(job.get("parents") or [])
+                    children_of[key] = list(job.get("children") or [])
+
+        if not job_map:
+            return
+
+        completed: Set[str] = set()
+        to_run: List[str] = []
+
+        for key in job_map:
+            if job_filter and not job_filter(key):
+                self.logger.info(f"[SKIP] {key} (already completed)")
+                completed.add(key)
+            else:
+                to_run.append(key)
+
+        remaining: Dict[str, int] = {
+            key: sum(1 for p in parents_of[key] if p not in completed) for key in to_run
+        }
+        submitted: Set[str] = set()
+        failed: Optional[BaseException] = None
+
+        def ready_keys() -> List[str]:
+            return [
+                key
+                for key in to_run
+                if key not in submitted and key not in completed and remaining.get(key, 0) == 0
+            ]
+
+        max_workers = max(1, len(to_run)) if to_run else 1
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures: Dict = {}
+
+            def submit_ready():
+                for key in ready_keys():
+                    if failed is not None:
+                        return
+                    stage_name, task_name, job = job_map[key]
+                    # job_filter already applied; do not re-filter inside run_job.
+                    fut = pool.submit(
+                        self.run_job,
+                        flow_name,
+                        stage_name,
+                        task_name,
+                        job,
+                        poll_interval,
+                        None,
+                    )
+                    futures[fut] = key
+                    submitted.add(key)
+
+            submit_ready()
+
+            while futures:
+                done, _ = wait(futures.keys(), return_when=FIRST_COMPLETED)
+                for fut in done:
+                    key = futures.pop(fut)
+                    try:
+                        fut.result()
+                    except BaseException as exc:
+                        if failed is None:
+                            failed = exc
+                        continue
+
+                    if failed is not None:
+                        continue
+
+                    completed.add(key)
+                    for child in children_of.get(key, []):
+                        if child in remaining:
+                            remaining[child] -= 1
+
+                if failed is not None:
+                    # Drain in-flight work, then re-raise first failure.
+                    for fut in list(futures.keys()):
+                        try:
+                            fut.result()
+                        except BaseException:
+                            pass
+                        futures.pop(fut, None)
+                    raise failed
+
+                submit_ready()
+
+        # Jobs still waiting on unfinished parents (should not happen without failure).
+        stuck = [k for k in to_run if k not in completed]
+        if stuck:
+            raise RuntimeError(
+                f"Flow incomplete; jobs never became ready: {', '.join(stuck)}"
+            )
 
     @staticmethod
     def _create_unique_job_name(job_name: str) -> str:
@@ -491,9 +585,14 @@ def create_flow_runner(
     log_file: Optional[str] = None,
     log_callback: Optional[Callable] = None,
     job_callback: Optional[Callable[[str, Dict], None]] = None,
+    console: Optional[bool] = None,
 ) -> FlowRunner:
-    """Factory function to create a FlowRunner instance"""
-    logger = FlowLogger(log_file, log_callback)
+    """Factory function to create a FlowRunner instance.
+
+    When ``log_callback`` is set (GUI), console output defaults to off so the
+    launch terminal stays usable. CLI entry keeps console logging.
+    """
+    logger = FlowLogger(log_file, log_callback, console=console)
     validator = FlowValidator(logger)
     job_manager = LSFJobManager(logger)
     return FlowRunner(logger, validator, job_manager, job_callback)

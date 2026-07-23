@@ -37,7 +37,7 @@ class TestPVSpiRcxtLvs(unittest.TestCase):
         self.assertEqual(job["command"], "../flow/run_spi.sh")
         self.assertEqual(
             job["inputs"],
-            ["sm8466_top.spi", "../DATA/netlist.pg.v.gz"],
+            ["../DATA/ref.spi", "../DATA/netlist.pg.v.gz"],
         )
         self.assertEqual(job["outputs"], ["../spi/sm8466_top.cdl"])
 
@@ -94,9 +94,7 @@ class TestPVSpiRcxtLvs(unittest.TestCase):
         self.assertEqual(
             job["inputs"],
             [
-                "hcell",
-                "lvs.calibre",
-                "layout.spi",
+                "../DATA/hcell",
                 "../GDS/sm8466_top.oas",
                 "../spi/sm8466_top.cdl",
             ],
@@ -109,9 +107,7 @@ class TestPVSpiRcxtLvs(unittest.TestCase):
         self.assertEqual(
             job["inputs"],
             [
-                "hcell",
-                "lvs.calibre",
-                "layout.spi",
+                "../DATA/hcell",
                 "../GDS/sm8466_top.gds.gz",
                 "../spi/sm8466_top.cdl",
             ],

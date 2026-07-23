@@ -124,6 +124,10 @@ class FlowDocument:
                 queue="",
                 cpu=get_config().generator.new_job_cpu,
             )
+        else:
+            job = dict(job)
+            job.setdefault("parents", [])
+            job.setdefault("children", [])
         job_key = key or _job_key(stage_name, task_name, job["name"])
 
         stage = self._ensure_stage(stage_name)
@@ -191,6 +195,13 @@ class FlowDocument:
     def _relocate_key(self, old_key: JobKey, new_key: JobKey) -> None:
         if old_key == new_key:
             return
+        from flow_graph import key_to_slash, rewrite_relation_key_refs
+
+        rewrite_relation_key_refs(
+            self.stages,
+            key_to_slash(old_key),
+            key_to_slash(new_key),
+        )
         if old_key in self.positions:
             self.positions[new_key] = self.positions.pop(old_key)
         elif new_key not in self.positions:
@@ -371,14 +382,25 @@ def reorder_document_by_canvas(document: FlowDocument) -> None:
 def document_to_flow(document: FlowDocument) -> Flow:
     ensure_unique_stage_names(document)
     reorder_document_by_canvas(document)
-    return make_flow(document.flow_name, copy.deepcopy(document.stages), document.poll_interval)
+    # Preserve editor parents/children; do not re-seed from task-order/file.
+    return make_flow(
+        document.flow_name,
+        copy.deepcopy(document.stages),
+        document.poll_interval,
+        seed_relations=False,
+    )
 
 
 def flow_to_document(flow: Flow) -> FlowDocument:
+    from flow_graph import ensure_job_relations
+
+    stages = copy.deepcopy(flow["stages"])
+    # Keep parents/children as the editor source of truth; seed if missing.
+    ensure_job_relations(stages)
     doc = FlowDocument(
         flow_name=flow["flow_name"],
         poll_interval=flow["poll_interval"],
-        stages=copy.deepcopy(flow["stages"]),
+        stages=stages,
     )
     ensure_unique_stage_names(doc)
     auto_layout_all(doc)

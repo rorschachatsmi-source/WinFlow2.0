@@ -35,6 +35,7 @@ from flow_generator.gui.document import (
 from flow_generator.gui.graph import JobGraph, build_job_graph
 from flow_generator.gui.nodes import list_nodes_by_flow, load_node, node_dir, node_summary
 from winflow_config import get_config
+from winflow_icon import apply_window_icon
 
 # Segoe UI / Cascadia Mono are Windows fonts; missing glyphs on Linux X11 often
 # trigger RENDER RenderAddGlyphs BadLength errors. Use Linux-safe fallbacks.
@@ -1840,6 +1841,7 @@ class FlowGeneratorApp(tk.Tk):
     def __init__(self):
         super().__init__()
         configure_safe_tk_fonts(self)
+        apply_window_icon(self)
         gui_cfg = get_config().gui
         self.title("WinFlow Generator")
         self.geometry(gui_cfg.generator_window_size)

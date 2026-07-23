@@ -19,6 +19,7 @@ class RunnerConfig:
     kill_poll_ms: int = 15000
     kill_max_retries: int = 4
     log_tail_interval_sec: float = 0.5
+    job_log_view_lines: int = 100
     thread_join_timeout_sec: float = 1.0
     log_viewer: str = "gvim"
     auto_load_delay_ms: int = 150

@@ -95,5 +95,55 @@ class TestFlowGraph(unittest.TestCase):
         self.assertIn((parent, child, "out.dat"), edges)
 
 
+class TestAnnotateJobRelations(unittest.TestCase):
+    def test_annotate_writes_mutual_parents_children(self):
+        from flow_graph import annotate_job_relations, validate_job_relations
+
+        stages = [
+            {
+                "name": "s1",
+                "tasks": [
+                    {
+                        "name": "t1",
+                        "jobs": [
+                            {"name": "j1", "inputs": [], "outputs": ["a.txt"]},
+                            {"name": "j2", "inputs": ["a.txt"], "outputs": []},
+                        ],
+                    }
+                ],
+            }
+        ]
+        annotate_job_relations(stages)
+        j1, j2 = stages[0]["tasks"][0]["jobs"]
+        self.assertEqual(j1["parents"], [])
+        self.assertEqual(j1["children"], ["s1/t1/j2"])
+        self.assertEqual(j2["parents"], ["s1/t1/j1"])
+        self.assertEqual(j2["children"], [])
+        self.assertIsNone(validate_job_relations(stages))
+
+    def test_strip_job_relations_removes_fields(self):
+        from flow_graph import annotate_job_relations, strip_job_relations
+
+        stages = [
+            {
+                "name": "s1",
+                "tasks": [
+                    {
+                        "name": "t1",
+                        "jobs": [
+                            {"name": "j1", "inputs": [], "outputs": ["a.txt"]},
+                            {"name": "j2", "inputs": ["a.txt"], "outputs": []},
+                        ],
+                    }
+                ],
+            }
+        ]
+        annotate_job_relations(stages)
+        strip_job_relations(stages)
+        for job in stages[0]["tasks"][0]["jobs"]:
+            self.assertNotIn("parents", job)
+            self.assertNotIn("children", job)
+
+
 if __name__ == "__main__":
     unittest.main()

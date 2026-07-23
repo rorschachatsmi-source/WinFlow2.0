@@ -14,6 +14,7 @@ from tkinter import ttk
 import flow_generator_gui as gen_gui
 import flow_runner_gui as run_gui
 from winflow_config import get_config
+from winflow_icon import apply_window_icon
 
 
 class WinFlowApp(tk.Tk):
@@ -24,6 +25,7 @@ class WinFlowApp(tk.Tk):
         # Pin fonts before any widgets — prevents Linux X11 emoji-font crashes.
         run_gui.configure_safe_tk_fonts(self)
         gen_gui.configure_safe_tk_fonts(self)
+        apply_window_icon(self)
 
         gui_cfg = get_config().gui
         self.title("WinFlow")
